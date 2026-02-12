@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Visual Reconstruction with EEG
 Reconstructing stimulus image from EEG data. Aiming for accurate shape, color, image structure over semantic accuracy.
 
@@ -10,6 +9,3 @@ Reconstructing stimulus image from EEG data. Aiming for accurate shape, color, i
 3. Create virtual Python environment
     1. We used Python 3.12.3
     2. `pip install -r requirements.txt`
-=======
-# visual-reconstruction-eeg
->>>>>>> origin/main
