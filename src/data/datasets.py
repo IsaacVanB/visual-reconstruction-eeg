@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 from PIL import Image
@@ -9,12 +9,29 @@ from torch.utils.data import Dataset
 # data is in eeg_project_26/datasets/THINGS_EEG_2 --> sub-1/preprocessed_eeg_training.npy
 
 
+def _resolve_class_indices(
+    class_indices: Optional[Sequence[int]], num_classes: int
+) -> np.ndarray:
+    if class_indices is None:
+        return np.arange(num_classes, dtype=np.int64)
+
+    resolved = np.asarray(list(class_indices), dtype=np.int64)
+    if resolved.ndim != 1 or resolved.size == 0:
+        raise ValueError("class_indices must be a non-empty 1D list/sequence of class ids.")
+    if np.any(resolved < 0) or np.any(resolved >= num_classes):
+        raise ValueError(f"class_indices must be in [0, {num_classes - 1}].")
+    if np.unique(resolved).size != resolved.size:
+        raise ValueError("class_indices contains duplicates.")
+    return resolved
+
+
 class EEGImageDataset(Dataset):
     def __init__(
         self,
         dataset_root: str,
         subject: str = "sub-1",
         split: str = "train",
+        class_indices: Optional[Sequence[int]] = None,
         transform=None,
         target_transform=None,
         mmap_mode: Optional[str] = "r",
@@ -25,6 +42,7 @@ class EEGImageDataset(Dataset):
         self.dataset_root = dataset_root
         self.subject = subject
         self.split = split
+        self.class_indices = class_indices
         self.transform = transform
         self.target_transform = target_transform
         self.mmap_mode = mmap_mode
@@ -84,6 +102,7 @@ class EEGImageDataset(Dataset):
                 f"got {self.num_images} and {self.images_per_class}."
             )
         self.num_classes = self.num_images // self.images_per_class
+        self.class_indices = _resolve_class_indices(self.class_indices, self.num_classes)
 
         self._split_counts = {"train": 8, "valid": 1, "test": 1}
         if self.split not in self._split_counts:
@@ -112,7 +131,7 @@ class EEGImageDataset(Dataset):
 
         rng = np.random.default_rng(self.split_seed)
         split_image_indices = []
-        for class_idx in range(self.num_classes):
+        for class_idx in self.class_indices:
             class_start = class_idx * self.images_per_class
             class_images = np.arange(class_start, class_start + self.images_per_class)
             shuffled = rng.permutation(class_images)
@@ -157,3 +176,104 @@ class EEGImageDataset(Dataset):
             return eeg_sample, image, label, image_name
 
         return eeg_sample, image, label
+
+class ImageDataset(Dataset):
+    def __init__(
+        self,
+        dataset_root: str,
+        split: str = "train",
+        class_indices: Optional[Sequence[int]] = None,
+        image_transform=None,
+        target_transform=None,
+        return_image_name: bool = False,
+        split_seed: int = 0,
+    ) -> None:
+        self.dataset_root = dataset_root
+        self.split = split
+        self.class_indices = class_indices
+        self.image_transform = image_transform
+        self.target_transform = target_transform
+        self.return_image_name = return_image_name
+        self.split_seed = split_seed
+
+        img_metadata_path = os.path.join(self.dataset_root, "THINGS_EEG_2", "image_metadata.npy")
+        if not os.path.exists(img_metadata_path):
+            raise FileNotFoundError(f"Image metadata not found: {img_metadata_path}")
+        img_metadata = np.load(img_metadata_path, allow_pickle=True).item()
+        if "train_img_files" not in img_metadata:
+            raise KeyError("Expected key 'train_img_files' in image metadata.")
+        self.train_img_files = img_metadata["train_img_files"]
+
+        self.image_root = os.path.join(self.dataset_root, "images_THINGS", "object_images")
+        self.num_images = len(self.train_img_files)
+        self.images_per_class = 10
+        if self.num_images % self.images_per_class != 0:
+            raise ValueError(
+                "Number of images must be divisible by images_per_class; "
+                f"got {self.num_images} and {self.images_per_class}."
+            )
+        self.num_classes = self.num_images // self.images_per_class
+        self.class_indices = _resolve_class_indices(self.class_indices, self.num_classes)
+
+        self._split_counts = {"train": 8, "valid": 1, "test": 1}
+        if self.split not in self._split_counts:
+            raise ValueError("split must be one of: 'train', 'valid', 'test'.")
+
+        self._split_image_indices = self._build_split_image_indices()
+
+    def _build_split_image_indices(self):
+        split_offsets = {
+            "train": (0, self._split_counts["train"]),
+            "valid": (
+                self._split_counts["train"],
+                self._split_counts["train"] + self._split_counts["valid"],
+            ),
+            "test": (
+                self._split_counts["train"] + self._split_counts["valid"],
+                self.images_per_class,
+            ),
+        }
+        start, end = split_offsets[self.split]
+
+        rng = np.random.default_rng(self.split_seed)
+        split_image_indices = []
+        for class_idx in self.class_indices:
+            class_start = class_idx * self.images_per_class
+            class_images = np.arange(class_start, class_start + self.images_per_class)
+            shuffled = rng.permutation(class_images)
+            split_image_indices.extend(shuffled[start:end].tolist())
+
+        return np.array(split_image_indices, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self._split_image_indices)
+
+    def __getitem__(self, idx: int):
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index out of range: {idx}")
+
+        image_index = int(self._split_image_indices[idx])
+        label = image_index // self.images_per_class
+        if self.target_transform:
+            label = self.target_transform(label)
+
+        image_name = self.train_img_files[image_index]
+        if "/" in image_name or os.path.sep in image_name:
+            rel_path = image_name
+        else:
+            class_name = image_name.rsplit("_", 1)[0]
+            rel_path = os.path.join(class_name, image_name)
+
+        image_path = os.path.join(self.image_root, rel_path)
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+
+        with Image.open(image_path) as pil_image:
+            image = pil_image.convert("RGB")
+        if self.image_transform:
+            image = self.image_transform(image)
+
+        if self.return_image_name:
+            return image, label, image_name
+
+        return image, label

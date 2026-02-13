@@ -87,3 +87,25 @@ def build_eeg_transform(
     if to_tensor:
         transforms.append(EEGToTensor())
     return Compose(transforms)
+
+"""
+EXAMPLE USAGE
+
+from src.data import build_eeg_dataloader, build_eeg_transform, build_image_transform
+
+eeg_tf = build_eeg_transform(normalize_per_sample=True, to_tensor=True)
+img_tf = build_image_transform(
+    image_size=(256, 256),
+    mean=(0.5, 0.5, 0.5),
+    std=(0.5, 0.5, 0.5),
+)
+
+loader = build_eeg_dataloader(
+    dataset_root="datasets",
+    split="train",
+    transform=eeg_tf,
+    image_transform=img_tf,
+    batch_size=32,
+)
+
+"""
