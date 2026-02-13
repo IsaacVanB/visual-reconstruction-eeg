@@ -5,37 +5,44 @@ from pathlib import Path
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
-from src.training.train_dummy_vae import DummyVAEConfig, train_dummy_vae
+from src.training.train_dummy_vae import load_dummy_vae_config, train_dummy_vae
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a dummy VAE on image subset.")
-    parser.add_argument("--dataset-root", default="datasets")
-    parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--latent-dim", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--kl-weight", type=float, default=1e-3)
-    parser.add_argument("--image-size", type=int, default=64)
-    parser.add_argument("--split-seed", type=int, default=0)
-    parser.add_argument("--output-dir", default="outputs/dummy_vae")
+    parser.add_argument("--config", default="configs/dummy_vae.yaml")
+    parser.add_argument("--dataset-root")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--latent-dim", type=int)
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--kl-weight", type=float)
+    parser.add_argument("--image-size", type=int)
+    parser.add_argument("--split-seed", type=int)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--device")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    config = DummyVAEConfig(
-        dataset_root=args.dataset_root,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        latent_dim=args.latent_dim,
-        lr=args.lr,
-        kl_weight=args.kl_weight,
-        image_size=(args.image_size, args.image_size),
-        split_seed=args.split_seed,
-        output_dir=args.output_dir,
+    overrides = {
+        "dataset_root": args.dataset_root,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "latent_dim": args.latent_dim,
+        "lr": args.lr,
+        "kl_weight": args.kl_weight,
+        "image_size": (args.image_size, args.image_size) if args.image_size is not None else None,
+        "split_seed": args.split_seed,
+        "output_dir": args.output_dir,
+        "device": args.device,
+    }
+    config = load_dummy_vae_config(
+        config_path=args.config,
+        overrides=overrides,
     )
     train_dummy_vae(config)
 

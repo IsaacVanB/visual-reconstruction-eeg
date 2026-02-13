@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
+import yaml
 
 from src.data import build_image_dataloader, build_image_transform
 from src.models import ConvVAE
@@ -47,6 +48,50 @@ class DummyVAEConfig:
     class_indices: Sequence[int] = tuple(DUMMY_CLASS_INDICES)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "outputs/dummy_vae"
+
+
+def _normalize_image_size(image_size: Any) -> tuple[int, int]:
+    if isinstance(image_size, int):
+        return (image_size, image_size)
+    if isinstance(image_size, (list, tuple)) and len(image_size) == 2:
+        return (int(image_size[0]), int(image_size[1]))
+    raise ValueError("image_size must be an int or a 2-element list/tuple.")
+
+
+def load_dummy_vae_config(
+    config_path: str,
+    overrides: Optional[dict[str, Any]] = None,
+) -> DummyVAEConfig:
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("YAML config must contain a top-level mapping.")
+
+    data = dict(raw)
+    if overrides:
+        for key, value in overrides.items():
+            if value is not None:
+                data[key] = value
+
+    image_size = _normalize_image_size(data.get("image_size", (64, 64)))
+    class_indices = data.get("class_indices", DUMMY_CLASS_INDICES)
+    if class_indices is None:
+        class_indices = DUMMY_CLASS_INDICES
+
+    return DummyVAEConfig(
+        dataset_root=str(data.get("dataset_root", "datasets")),
+        image_size=image_size,
+        latent_dim=int(data.get("latent_dim", 32)),
+        batch_size=int(data.get("batch_size", 32)),
+        num_workers=int(data.get("num_workers", 0)),
+        lr=float(data.get("lr", 1e-3)),
+        epochs=int(data.get("epochs", 2)),
+        kl_weight=float(data.get("kl_weight", 1e-3)),
+        split_seed=int(data.get("split_seed", 0)),
+        class_indices=tuple(int(x) for x in class_indices),
+        device=str(data.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
+        output_dir=str(data.get("output_dir", "outputs/dummy_vae")),
+    )
 
 
 def vae_loss(

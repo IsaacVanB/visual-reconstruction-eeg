@@ -1,0 +1,33 @@
+dataset_root: datasets
+image_size: [64, 64]
+latent_dim: 32
+batch_size: 32
+num_workers: 0
+lr: 0.001
+epochs: 2
+kl_weight: 0.001
+split_seed: 0
+device: cpu
+output_dir: outputs/dummy_vae
+
+class_indices:
+  - 9
+  - 525
+  - 59
+  - 159
+  - 178
+  - 436
+  - 408
+  - 431
+  - 853
+  - 435
+  - 615
+  - 977
+  - 1055
+  - 779
+  - 1627
+  - 1219
+  - 1319
+  - 277
+  - 1461
+  - 1476
