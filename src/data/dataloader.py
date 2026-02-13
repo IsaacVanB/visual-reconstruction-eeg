@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .datasets import EEGImageDataset
+from .datasets import EEGImageDataset, ImageDataset
 
 
 def _eeg_image_collate(batch):
@@ -72,5 +72,46 @@ def build_eeg_dataloader(
         pin_memory=pin_memory,
         drop_last=drop_last,
         collate_fn=_eeg_image_collate,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+    )
+
+
+def build_image_dataloader(
+    dataset_root: str,
+    split: str = "train",
+    class_indices=None,
+    batch_size: int = 32,
+    shuffle: Optional[bool] = None,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    drop_last: Optional[bool] = None,
+    image_transform=None,
+    target_transform=None,
+    split_seed: int = 0,
+    return_image_name: bool = False,
+    persistent_workers: bool = False,
+) -> DataLoader:
+    if shuffle is None:
+        shuffle = split == "train"
+    if drop_last is None:
+        drop_last = split == "train"
+
+    dataset = ImageDataset(
+        dataset_root=dataset_root,
+        split=split,
+        class_indices=class_indices,
+        image_transform=image_transform,
+        target_transform=target_transform,
+        split_seed=split_seed,
+        return_image_name=return_image_name,
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
         persistent_workers=persistent_workers if num_workers > 0 else False,
     )
