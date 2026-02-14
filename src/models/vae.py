@@ -5,7 +5,21 @@ from torch import nn
 
 
 class ConvVAE(nn.Module):
-    """Simple convolutional VAE intended for pipeline validation."""
+    """Simple convolutional VAE intended for pipeline validation.
+
+    Architecture experimentation guide:
+    - Safe to change:
+      - `hidden_dims`: controls encoder/decoder channel widths and depth.
+      - activation/batchnorm choices in encoder/decoder blocks.
+      - `latent_dim`: bottleneck size.
+      - conv kernel/stride/padding values.
+    - Must stay consistent:
+      - Decoder must upsample back to input spatial size.
+      - Final output channels must equal `in_channels`.
+      - Final activation must match training target normalization:
+        - `Sigmoid` -> targets in [0, 1]
+        - `Tanh` -> targets in [-1, 1]
+    """
 
     def __init__(
         self,
@@ -20,6 +34,9 @@ class ConvVAE(nn.Module):
         self.latent_dim = latent_dim
         self.hidden_dims = hidden_dims
 
+        # Encoder design space:
+        # - You can replace Conv2d blocks with residual/attention/downsampling blocks.
+        # - Keep the final feature tensor compatible with the MLP heads below.
         encoder_layers = []
         current_channels = in_channels
         for h_dim in hidden_dims:
@@ -33,16 +50,24 @@ class ConvVAE(nn.Module):
             current_channels = h_dim
         self.encoder = nn.Sequential(*encoder_layers)
 
+        # Shape inference keeps the model robust to many architecture changes.
+        # If you modify encoder depth/strides, this adapts `fc_mu/fc_logvar` sizes.
         with torch.no_grad():
             dummy = torch.zeros(1, in_channels, image_size[0], image_size[1])
             enc_out = self.encoder(dummy)
             self._enc_shape = enc_out.shape[1:]
             enc_flat_dim = int(enc_out.numel())
 
+        # Latent heads:
+        # - Safe to replace with deeper MLPs or separate feature projections.
+        # - `latent_dim` can be varied directly from config.
         self.fc_mu = nn.Linear(enc_flat_dim, latent_dim)
         self.fc_logvar = nn.Linear(enc_flat_dim, latent_dim)
         self.decoder_input = nn.Linear(latent_dim, enc_flat_dim)
 
+        # Decoder design space mirrors encoder:
+        # - You can change upsampling strategy (transpose conv, resize+conv, etc.).
+        # - Ensure total upsampling factor restores original HxW.
         decoder_layers = []
         rev_dims = list(hidden_dims[::-1])
         for i in range(len(rev_dims) - 1):
@@ -61,6 +86,9 @@ class ConvVAE(nn.Module):
             )
         self.decoder = nn.Sequential(*decoder_layers)
 
+        # IMPORTANT: output activation must match image transform normalization.
+        # Current pipeline uses ImageToTensor in [0,1], so Sigmoid is correct.
+        # If you switch to Tanh here, switch training/eval image normalization to [-1,1].
         self.final_layer = nn.Sequential(
             nn.ConvTranspose2d(
                 hidden_dims[0], hidden_dims[0], kernel_size=4, stride=2, padding=1

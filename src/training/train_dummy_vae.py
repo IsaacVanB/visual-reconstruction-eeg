@@ -36,16 +36,32 @@ DUMMY_CLASS_INDICES = [
 
 @dataclass
 class DummyVAEConfig:
+    # Dataset + transforms:
+    # - `image_size` should be changed first when you want faster/slower experiments.
+    # - Keep `dataset_root` pointing to repo datasets folder.
     dataset_root: str = "datasets"
     image_size: tuple[int, int] = (64, 64)
+
+    # Model capacity:
+    # - `latent_dim` is the easiest architecture-level knob from config.
     latent_dim: int = 32
+
+    # Optimization:
     batch_size: int = 32
     num_workers: int = 0
     lr: float = 1e-3
     epochs: int = 2
+
+    # Objective weighting:
+    # - Increase `kl_weight` for stronger latent regularization.
+    # - Decrease it when reconstructions collapse/blurry too early.
     kl_weight: float = 1e-3
+
+    # Data split control:
     split_seed: int = 0
     class_indices: Sequence[int] = tuple(DUMMY_CLASS_INDICES)
+
+    # Runtime + outputs:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "outputs/dummy_vae"
 
@@ -101,6 +117,10 @@ def vae_loss(
     logvar: torch.Tensor,
     kl_weight: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # This is a standard beta-VAE-style objective (beta == kl_weight).
+    # Safe to change:
+    # - reconstruction term (MSE -> L1 or BCE)
+    # - KL scheduling/warmup logic
     recon = F.mse_loss(recon_x, x, reduction="mean")
     kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     total = recon + kl_weight * kl
@@ -152,6 +172,9 @@ def train_dummy_vae(config: DummyVAEConfig) -> Path:
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # IMPORTANT coupling:
+    # - model `image_size`, transform `image_size`, and checkpoint metadata
+    #   should stay aligned for reproducible experiments.
     image_transform = build_image_transform(image_size=config.image_size)
     train_loader = build_image_dataloader(
         dataset_root=config.dataset_root,
@@ -174,6 +197,9 @@ def train_dummy_vae(config: DummyVAEConfig) -> Path:
         drop_last=False,
     )
 
+    # Architecture experimentation entry point:
+    # - edit ConvVAE internals in src/models/vae.py
+    # - keep this constructor parameters in sync with config fields
     model = ConvVAE(image_size=config.image_size, latent_dim=config.latent_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
 
