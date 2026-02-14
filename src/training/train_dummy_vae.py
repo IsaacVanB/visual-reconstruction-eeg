@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 import yaml
@@ -167,6 +169,61 @@ def _run_epoch(
     }
 
 
+def _save_training_artifacts(
+    output_dir: Path,
+    history: dict[str, list[float]],
+    config: DummyVAEConfig,
+) -> None:
+    epochs = list(range(1, len(history["train_loss"]) + 1))
+
+    metrics_path = output_dir / "metrics_history.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+
+    summary = {
+        "final_train_loss": history["train_loss"][-1],
+        "final_valid_loss": history["valid_loss"][-1],
+        "final_train_recon": history["train_recon"][-1],
+        "final_valid_recon": history["valid_recon"][-1],
+        "final_train_kl": history["train_kl"][-1],
+        "final_valid_kl": history["valid_kl"][-1],
+        "best_valid_loss": min(history["valid_loss"]),
+        "epochs": config.epochs,
+    }
+    summary_path = output_dir / "training_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    # Curves: total loss + decomposition to help diagnose convergence and KL balance.
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    axes[0].plot(epochs, history["train_loss"], label="train")
+    axes[0].plot(epochs, history["valid_loss"], label="valid")
+    axes[0].set_title("Total Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Loss")
+    axes[0].legend()
+
+    axes[1].plot(epochs, history["train_recon"], label="train")
+    axes[1].plot(epochs, history["valid_recon"], label="valid")
+    axes[1].set_title("Reconstruction Loss")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Recon")
+    axes[1].legend()
+
+    axes[2].plot(epochs, history["train_kl"], label="train")
+    axes[2].plot(epochs, history["valid_kl"], label="valid")
+    axes[2].set_title("KL Divergence")
+    axes[2].set_xlabel("Epoch")
+    axes[2].set_ylabel("KL")
+    axes[2].legend()
+
+    plt.tight_layout()
+    curve_path = output_dir / "loss_curves.png"
+    fig.savefig(curve_path, dpi=150)
+    plt.close(fig)
+
+
 def train_dummy_vae(config: DummyVAEConfig) -> Path:
     device = torch.device(config.device)
     output_dir = Path(config.output_dir)
@@ -206,6 +263,14 @@ def train_dummy_vae(config: DummyVAEConfig) -> Path:
     print(f"Device: {device}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Valid samples: {len(valid_loader.dataset)}")
+    history = {
+        "train_loss": [],
+        "valid_loss": [],
+        "train_recon": [],
+        "valid_recon": [],
+        "train_kl": [],
+        "valid_kl": [],
+    }
 
     for epoch in range(1, config.epochs + 1):
         train_metrics = _run_epoch(
@@ -229,6 +294,12 @@ def train_dummy_vae(config: DummyVAEConfig) -> Path:
             f"train_kl={train_metrics['kl']:.6f} | "
             f"valid_loss={valid_metrics['loss']:.6f}"
         )
+        history["train_loss"].append(train_metrics["loss"])
+        history["valid_loss"].append(valid_metrics["loss"])
+        history["train_recon"].append(train_metrics["recon"])
+        history["valid_recon"].append(valid_metrics["recon"])
+        history["train_kl"].append(train_metrics["kl"])
+        history["valid_kl"].append(valid_metrics["kl"])
 
     ckpt_path = output_dir / "dummy_vae.pt"
     torch.save(
@@ -239,5 +310,9 @@ def train_dummy_vae(config: DummyVAEConfig) -> Path:
         },
         ckpt_path,
     )
+    _save_training_artifacts(output_dir=output_dir, history=history, config=config)
     print(f"Saved checkpoint: {ckpt_path}")
+    print(f"Saved curves: {output_dir / 'loss_curves.png'}")
+    print(f"Saved metrics: {output_dir / 'metrics_history.json'}")
+    print(f"Saved summary: {output_dir / 'training_summary.json'}")
     return ckpt_path
