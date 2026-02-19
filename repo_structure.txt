@@ -6,10 +6,10 @@ eeg_project_26/
 ├─ requirements.txt
 ├─ .gitignore
 ├─ configs/                # parameters stored here (don't hardcode in .py files)
-│  ├─ base.yaml*
+│  ├─ dummy_vae.yaml*
 │  ├─ train.yaml*
 │  └─ eval.yaml*
-├─ src/                    # reusable code
+├─ src/
 │  ├─ __init__.py
 │  ├─ data/
 │  │  ├─ datasets.py      # THINGS-EEG / THINGS2-EEG dataset classes
