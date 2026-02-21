@@ -3,6 +3,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
 
 # this file is in eeg_project_26/src/data
@@ -176,6 +177,74 @@ class EEGImageDataset(Dataset):
             return eeg_sample, image, label, image_name
 
         return eeg_sample, image, label
+
+
+class EEGImageLatentDataset(EEGImageDataset):
+    def __init__(
+        self,
+        dataset_root: str,
+        subject: str = "sub-1",
+        split: str = "train",
+        class_indices: Optional[Sequence[int]] = None,
+        transform=None,
+        target_transform=None,
+        mmap_mode: Optional[str] = "r",
+        latent_root: str = os.path.join("latents", "img"),
+        latent_transform=None,
+        split_seed: int = 0,
+    ) -> None:
+        super().__init__(
+            dataset_root=dataset_root,
+            subject=subject,
+            split=split,
+            class_indices=class_indices,
+            transform=transform,
+            target_transform=target_transform,
+            mmap_mode=mmap_mode,
+            image_transform=None,
+            return_image_name=False,
+            split_seed=split_seed,
+        )
+        self.latent_root = latent_root
+        self.latent_transform = latent_transform
+
+    def _resolve_latent_path(self, image_index: int) -> str:
+        latent_path = os.path.join(self.latent_root, f"{image_index}.pt")
+        if os.path.exists(latent_path):
+            return latent_path
+
+        padded_latent_path = os.path.join(self.latent_root, f"{image_index:06d}.pt")
+        if os.path.exists(padded_latent_path):
+            return padded_latent_path
+
+        raise FileNotFoundError(
+            "Latent file not found for image index "
+            f"{image_index}. Tried: {latent_path} and {padded_latent_path}"
+        )
+
+    def __getitem__(self, idx: int):
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index out of range: {idx}")
+
+        image_index, rep_index = self._sample_index[idx]
+        eeg_sample = self.eeg[image_index, rep_index]
+        label = image_index // self.images_per_class
+
+        if self.transform:
+            eeg_sample = self.transform(eeg_sample)
+        if self.target_transform:
+            label = self.target_transform(label)
+
+        latent_path = self._resolve_latent_path(int(image_index))
+        try:
+            image_latent = torch.load(latent_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            image_latent = torch.load(latent_path, map_location="cpu")
+        if self.latent_transform:
+            image_latent = self.latent_transform(image_latent)
+
+        return eeg_sample, image_latent, label
+
 
 class ImageDataset(Dataset):
     def __init__(
