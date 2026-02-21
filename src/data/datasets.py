@@ -186,6 +186,7 @@ class ImageDataset(Dataset):
         image_transform=None,
         target_transform=None,
         return_image_name: bool = False,
+        return_image_id: bool = False,
         split_seed: int = 0,
     ) -> None:
         self.dataset_root = dataset_root
@@ -194,6 +195,7 @@ class ImageDataset(Dataset):
         self.image_transform = image_transform
         self.target_transform = target_transform
         self.return_image_name = return_image_name
+        self.return_image_id = return_image_id
         self.split_seed = split_seed
 
         img_metadata_path = os.path.join(self.dataset_root, "THINGS_EEG_2", "image_metadata.npy")
@@ -275,5 +277,8 @@ class ImageDataset(Dataset):
 
         if self.return_image_name:
             return image, label, image_name
+        
+        if self.return_image_id:
+            return image, label, image_index
 
         return image, label
