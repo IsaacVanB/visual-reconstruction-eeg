@@ -1,0 +1,51 @@
+# Data
+dataset_root: datasets
+latent_root: latents/img_pca
+subject: sub-1
+split_seed: 0
+
+# Match latent PCA dimensionality.
+output_dim: 128
+
+# EEG encoder architecture
+temporal_filters: 32
+depth_multiplier: 2
+temporal_kernel1: 51
+temporal_kernel3: 13
+pool1: 2
+pool3: 5
+dropout: 0.3
+
+# Optimization
+batch_size: 16
+num_workers: 0
+lr: 0.001
+weight_decay: 0.0001
+epochs: 20
+
+# Runtime/output
+device: cuda
+output_dir: outputs/eeg_encoder
+
+# Subset experiment control
+class_indices:
+  - 9
+  - 525
+  - 59
+  - 159
+  - 178
+  - 436
+  - 408
+  - 431
+  - 853
+  - 435
+  - 615
+  - 977
+  - 1055
+  - 779
+  - 1627
+  - 1219
+  - 1319
+  - 277
+  - 1461
+  - 1476
