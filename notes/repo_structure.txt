@@ -1,13 +1,12 @@
-MOST OF THIS DOESN'T EXIST YET (if *, doesn't exist)
-This is just a structure to follow as we create more files
+M(if *, doesn't exist)
+This is a structure to follow as we create more files
 
-eeg_project_26/
+visual-reconstruction-eeg/
 ├─ README.md
 ├─ requirements.txt
 ├─ .gitignore
 ├─ configs/                # parameters stored here (don't hardcode in .py files)
-│  ├─ dummy_vae.yaml
-│  ├─ eeg_encoder.yaml*
+│  ├─ eeg_encoder.yaml
 │  └─ eval.yaml*
 ├─ src/
 │  ├─ __init__.py
@@ -25,7 +24,7 @@ eeg_project_26/
 │  │  └─ optim.py*
 │  ├─ evaluation/
 │  │  ├─ metrics.py*
-│  │  └─ eval.py*
+│  │  └─ eval_eeg_encoder.py
 │  └─ utils/
 │     ├─ seed.py*
 │     ├─ logging.py*

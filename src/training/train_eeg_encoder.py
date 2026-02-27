@@ -39,12 +39,18 @@ DEFAULT_CLASS_INDICES = [
 
 @dataclass
 class EEGEncoderConfig:
+    # Data roots/splits:
+    # - Keep dataset_root + latent_root synchronized to the same preprocessing run.
+    # - class_indices lets you run controlled subset experiments.
     dataset_root: str = "datasets"
     latent_root: str = "latents/img_pca"
     subject: str = "sub-1"
     split_seed: int = 0
     class_indices: Sequence[int] = tuple(DEFAULT_CLASS_INDICES)
 
+    # Model architecture knobs:
+    # - output_dim MUST match PCA latent dimension (k) used as target.
+    # - temporal_* and pooling values control temporal receptive field/compression.
     output_dim: int = 512
     temporal_filters: int = 32
     depth_multiplier: int = 2
@@ -54,15 +60,19 @@ class EEGEncoderConfig:
     pool3: int = 5
     dropout: float = 0.3
 
+    # Optimization knobs:
     batch_size: int = 64
     num_workers: int = 0
     lr: float = 1e-3
     weight_decay: float = 1e-4
     epochs: int = 20
 
+    # Runtime/output:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "outputs/eeg_encoder"
 
+    # EEG preprocessing:
+    # Keep this aligned between train and eval for consistent feature scale.
     eeg_l2_normalize: bool = True
     pin_memory: bool = False
 
@@ -113,6 +123,7 @@ def load_eeg_encoder_config(
 
 
 def _make_loader(config: EEGEncoderConfig, split: str, shuffle: bool, drop_last: bool) -> DataLoader:
+    # Safe to change transform composition here, but keep train/eval aligned.
     eeg_transform = build_eeg_transform(
         normalize_per_sample=config.eeg_l2_normalize,
         to_tensor=True,
@@ -158,11 +169,13 @@ def _run_epoch(
 
         with torch.set_grad_enabled(is_train):
             pred = model(eeg)
+            # Hard contract: encoder output dim must equal latent target dim.
             if pred.shape != target.shape:
                 raise RuntimeError(
                     f"Prediction shape {tuple(pred.shape)} does not match "
                     f"target shape {tuple(target.shape)}"
                 )
+            # Safe to change objective (e.g., cosine/L1/Huber), but update evaluation expectations.
             loss = F.mse_loss(pred, target, reduction="mean")
             if is_train:
                 loss.backward()
@@ -232,6 +245,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     eeg_channels = int(sample_eeg.shape[0])
     eeg_timesteps = int(sample_eeg.shape[1])
     target_dim = int(sample_latent.numel())
+    # Hard constraint: model output_dim must match latent target dimension exactly.
     if target_dim != config.output_dim:
         raise ValueError(
             f"Configured output_dim={config.output_dim} but latent target dim is {target_dim}. "
@@ -250,6 +264,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         pool3=config.pool3,
         dropout=config.dropout,
     ).to(device)
+    # Optimizer can be swapped freely (AdamW/Adam/SGD), but keep LR/WD ranges appropriate.
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.lr,
