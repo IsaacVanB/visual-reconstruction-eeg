@@ -6,8 +6,8 @@ eeg_project_26/
 ├─ requirements.txt
 ├─ .gitignore
 ├─ configs/                # parameters stored here (don't hardcode in .py files)
-│  ├─ dummy_vae.yaml*
-│  ├─ train.yaml*
+│  ├─ dummy_vae.yaml
+│  ├─ eeg_encoder.yaml*
 │  └─ eval.yaml*
 ├─ src/
 │  ├─ __init__.py
@@ -16,11 +16,11 @@ eeg_project_26/
 │  │  ├─ transforms.py    # preprocessing, augmentations
 │  │  └─ dataloader.py    # dataloader builders
 │  ├─ models/
-│  │  ├─ eeg_encoder.py*
+│  │  ├─ eeg_encoder.py
 │  │  ├─ image_encoder.py* # e.g., DINO feature extractor wrapper
 │  │  └─ heads.py*         # projection/decoder heads
 │  ├─ training/
-│  │  ├─ train.py*
+│  │  ├─ train_eeg_encoder.py
 │  │  ├─ losses.py*
 │  │  └─ optim.py*
 │  ├─ evaluation/
@@ -31,24 +31,27 @@ eeg_project_26/
 │     ├─ logging.py*
 │     └─ io.py*            # save/load embeddings, checkpoints
 ├─ scripts/                # less reusable, preprossing type stuff
-│  ├─ preprocess_eeg.py*
-│  ├─ extract_image_embeds.py*
-│  ├─ train_model.py*
-│  └─ eval_model.py*
+│  ├─ extract_image_embeds.py
+│  ├─ PCA_image_embeds.py
+│  ├─ image_encode_decode.py
+│  └─ train_eeg_encoder.py
 ├─ notebooks/
-│  ├─ 00_sanity_checks.ipynb*
-│  └─ 01_visualizations.ipynb*
+│  ├─ AE-ex1.ipynb
+│  ├─ g4g-vae-ex.ipynb
+│  ├─ loading_data.ipynb
+│  └─ VAE-ex1.ipynb
 ├─ datasets/                     # DO NOT commit, huge files
 │  ├─ README.md              # tells how to obtain/place data
 │  ├─ THINGS_EEG_2
 │  │  ├─ sub-1
 │  │  │  └─ preprocessed_eeg_training.npy
 │  │  └─ image_metadata.npy
-│  └─  images_THINGS
+│  └─ images_THINGS
 │     └─ object_images
 │        └─ aardvark
 │           └─ aardvark_01b.jpg
 └─ resources/
    ├─ papers
    └─ SKIL_IV
+      └─ visual_decoding.ipynb
 
