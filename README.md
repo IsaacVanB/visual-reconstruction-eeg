@@ -1,5 +1,6 @@
 # Visual Reconstruction with EEG
 Reconstructing stimulus image from EEG data. Aiming for accurate shape, color, image structure over semantic accuracy.
+![Model architecture](figures/model.jpg)
 
 ## Setup
 
