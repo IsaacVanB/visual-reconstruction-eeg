@@ -31,8 +31,7 @@ visual-reconstruction-eeg/
 │     └─ io.py*            # save/load embeddings, checkpoints
 ├─ scripts/                # less reusable, preprossing type stuff
 │  ├─ extract_image_embeds.py
-│  ├─ PCA_image_embeds.py
-│  ├─ image_encode_decode.py
+│  ├─ latent_decode.py
 │  └─ train_eeg_encoder.py
 ├─ notebooks/
 │  ├─ AE-ex1.ipynb
@@ -53,4 +52,3 @@ visual-reconstruction-eeg/
    ├─ papers
    └─ SKIL_IV
       └─ visual_decoding.ipynb
-
