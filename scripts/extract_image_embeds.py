@@ -4,10 +4,21 @@ import sys
 from pathlib import Path
 import warnings
 
-from diffusers import AutoencoderKL
 import numpy as np
 from PIL import Image
 import torch
+
+# Some dependency stacks call `torch.xpu.is_available()` unconditionally.
+# Older/macOS PyTorch builds may not expose `torch.xpu`, so provide a safe shim.
+if not hasattr(torch, "xpu"):
+    class _TorchXPUNull:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    torch.xpu = _TorchXPUNull()  # type: ignore[attr-defined]
+
+from diffusers import AutoencoderKL
 
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
