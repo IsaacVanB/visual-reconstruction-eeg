@@ -22,7 +22,7 @@ img_tf = build_image_transform(
     mean=(0.5, 0.5, 0.5),
     std=(0.5, 0.5, 0.5),
 )
-class_indices = [9, 525, 59, 159, 178, 436, 408, 431, 853, 435, 615, 977, 1055, 779, 1627, 1219, 1319, 277, 1461, 1476]
+class_indices = list(range(0, 200, 2))
 #_parse_class_indices(os.environ.get("EEG_CLASS_INDICES", ""))
 split = os.environ.get("EEG_SPLIT", "train")
 batch_size = int(os.environ.get("EEG_BATCH_SIZE", "32"))

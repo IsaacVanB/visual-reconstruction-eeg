@@ -12,28 +12,7 @@ from src.data import build_image_dataloader, build_image_transform
 from src.models import ConvVAE
 
 
-DUMMY_CLASS_INDICES = [
-    9,
-    525,
-    59,
-    159,
-    178,
-    436,
-    408,
-    431,
-    853,
-    435,
-    615,
-    977,
-    1055,
-    779,
-    1627,
-    1219,
-    1319,
-    277,
-    1461,
-    1476,
-]
+DUMMY_CLASS_INDICES = list(range(0, 200, 2))
 
 
 @dataclass

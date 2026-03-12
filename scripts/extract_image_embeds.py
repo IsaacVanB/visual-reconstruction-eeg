@@ -22,10 +22,7 @@ warnings.filterwarnings(
     module="huggingface_hub.utils._validators",
 )
 
-DEFAULT_CLASS_INDICES = [
-    9, 525, 59, 159, 178, 436, 408, 431, 853, 435,
-    615, 977, 1055, 779, 1627, 1219, 1319, 277, 1461, 1476,
-]
+DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
 
 
 def resolve_class_indices(class_indices, num_classes: int) -> np.ndarray:
