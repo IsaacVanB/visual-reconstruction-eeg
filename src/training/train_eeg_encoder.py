@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -172,28 +173,31 @@ def _save_artifacts(
     config: EEGEncoderConfig,
     history: dict[str, list[float]],
     model: EEGEncoderCNN,
-) -> Path:
-    ckpt_path = output_dir / "eeg_encoder.pt"
+) -> dict[str, Path]:
+    saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ckpt_path = output_dir / f"eeg_encoder_{saved_at}.pt"
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "config": config.__dict__,
             "class_indices": list(config.class_indices),
+            "saved_at": saved_at,
         },
         ckpt_path,
     )
 
-    metrics_path = output_dir / "metrics_history.json"
+    metrics_path = output_dir / f"metrics_history_{saved_at}.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
 
     summary = {
+        "saved_at": saved_at,
         "final_train_loss": history["train_loss"][-1],
         "final_valid_loss": history["valid_loss"][-1],
         "best_valid_loss": min(history["valid_loss"]),
         "epochs": config.epochs,
     }
-    summary_path = output_dir / "training_summary.json"
+    summary_path = output_dir / f"training_summary_{saved_at}.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
@@ -206,10 +210,16 @@ def _save_artifacts(
     ax.set_ylabel("Loss")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_dir / "loss_curves.png", dpi=150)
+    curve_path = output_dir / f"loss_curves_{saved_at}.png"
+    fig.savefig(curve_path, dpi=150)
     plt.close(fig)
 
-    return ckpt_path
+    return {
+        "checkpoint": ckpt_path,
+        "curves": curve_path,
+        "metrics": metrics_path,
+        "summary": summary_path,
+    }
 
 
 def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
@@ -278,14 +288,14 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             f"valid_mse={valid_metrics['loss']:.6f}"
         )
 
-    ckpt_path = _save_artifacts(
+    artifact_paths = _save_artifacts(
         output_dir=output_dir,
         config=config,
         history=history,
         model=model,
     )
-    print(f"Saved checkpoint: {ckpt_path}")
-    print(f"Saved curves: {output_dir / 'loss_curves.png'}")
-    print(f"Saved metrics: {output_dir / 'metrics_history.json'}")
-    print(f"Saved summary: {output_dir / 'training_summary.json'}")
-    return ckpt_path
+    print(f"Saved checkpoint: {artifact_paths['checkpoint']}")
+    print(f"Saved curves: {artifact_paths['curves']}")
+    print(f"Saved metrics: {artifact_paths['metrics']}")
+    print(f"Saved summary: {artifact_paths['summary']}")
+    return artifact_paths["checkpoint"]

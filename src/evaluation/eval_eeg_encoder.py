@@ -5,6 +5,7 @@ import sys
 import warnings
 
 from diffusers import AutoencoderKL
+import numpy as np
 from PIL import Image
 import torch
 from torch.utils.data import DataLoader
@@ -80,6 +81,12 @@ def parse_args():
         default=None,
         help="Alias for --max-samples.",
     )
+    parser.add_argument(
+        "--grid-images",
+        type=int,
+        default=8,
+        help="Number of columns in recon_grid.png (ground truth over reconstruction).",
+    )
     parser.add_argument("--device", default=None, help="cuda, cpu, etc.")
     parser.add_argument("--output-dir", default="outputs/decoded_eeg_img")
     return parser.parse_args()
@@ -104,6 +111,48 @@ def _tensor_to_pil(image_chw_01: torch.Tensor) -> Image.Image:
         .numpy()
     )
     return Image.fromarray(image_np)
+
+
+def _tensor_to_uint8_hwc(image_tensor: torch.Tensor) -> np.ndarray:
+    image = image_tensor.detach().cpu().clamp(0.0, 1.0)
+    image = (image * 255.0).round().to(dtype=torch.uint8)
+    return image.permute(1, 2, 0).numpy()
+
+
+def _build_reconstruction_grid(
+    originals: torch.Tensor, reconstructions: torch.Tensor, max_items: int
+) -> Image.Image:
+    n = min(max_items, originals.size(0), reconstructions.size(0))
+    if n <= 0:
+        raise ValueError("No images available to build a reconstruction grid.")
+
+    _, _, h, w = originals.shape
+    canvas = np.zeros((2 * h, n * w, 3), dtype=np.uint8)
+    for i in range(n):
+        canvas[0:h, i * w : (i + 1) * w] = _tensor_to_uint8_hwc(originals[i])
+        canvas[h : 2 * h, i * w : (i + 1) * w] = _tensor_to_uint8_hwc(reconstructions[i])
+    return Image.fromarray(canvas)
+
+
+def _resolve_image_path(image_root: Path, image_name: str) -> Path:
+    if "/" in image_name or "\\" in image_name:
+        rel_path = Path(image_name)
+    else:
+        class_name = image_name.rsplit("_", 1)[0]
+        rel_path = Path(class_name) / image_name
+    return image_root / rel_path
+
+
+def _load_ground_truth_tensor(
+    image_root: Path, image_name: str, width: int, height: int
+) -> torch.Tensor:
+    image_path = _resolve_image_path(image_root=image_root, image_name=image_name)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Ground-truth image file not found: {image_path}")
+    with Image.open(image_path) as pil_image:
+        image = pil_image.convert("RGB").resize((width, height), resample=Image.BICUBIC)
+    image_np = np.asarray(image, dtype=np.float32) / 255.0
+    return torch.from_numpy(image_np).permute(2, 0, 1).contiguous()
 
 
 def _load_scaling_factor(metadata_path: Path, vae: AutoencoderKL) -> float:
@@ -206,12 +255,17 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    image_root = Path(dataset_root) / "images_THINGS" / "object_images"
+    if not image_root.exists():
+        raise FileNotFoundError(f"Image root not found: {image_root}")
 
     print(f"Device: {device_t}")
     print(f"Test samples: {len(dataset)}")
     print(f"PCA shape: k={pca_k}, D={pca_d}")
     print(f"Scaling factor: {scaling_factor}")
     saved = 0
+    originals_for_grid = []
+    recons_for_grid = []
     with torch.no_grad():
         global_idx = 0
         for eeg, _target_latent, labels in loader:
@@ -236,6 +290,7 @@ def main():
             z_vae = z_full.view(-1, c, h, w)
             recon = vae.decode(z_vae / scaling_factor).sample
             recon_01 = (recon.clamp(-1.0, 1.0) + 1.0) / 2.0
+            _, _, recon_h, recon_w = recon_01.shape
 
             for j in range(recon_01.size(0)):
                 if args.max_samples is not None and saved >= args.max_samples:
@@ -247,12 +302,34 @@ def main():
                     f"rep_{int(rep_index)}.png"
                 )
                 _tensor_to_pil(recon_01[j]).save(output_dir / out_name)
+                if len(originals_for_grid) < args.grid_images:
+                    image_name = dataset.train_img_files[int(image_index)]
+                    gt = _load_ground_truth_tensor(
+                        image_root=image_root,
+                        image_name=image_name,
+                        width=int(recon_w),
+                        height=int(recon_h),
+                    )
+                    originals_for_grid.append(gt)
+                    recons_for_grid.append(recon_01[j].detach().cpu())
                 saved += 1
                 global_idx += 1
             if args.max_samples is not None and saved >= args.max_samples:
                 break
             if saved % 100 == 0 and saved > 0:
                 print(f"Saved {saved} images...")
+
+    if originals_for_grid:
+        originals_t = torch.stack(originals_for_grid, dim=0)
+        recons_t = torch.stack(recons_for_grid, dim=0)
+        grid = _build_reconstruction_grid(
+            originals=originals_t,
+            reconstructions=recons_t,
+            max_items=args.grid_images,
+        )
+        grid_path = output_dir / "recon_grid.png"
+        grid.save(grid_path)
+        print(f"Saved recon grid: {grid_path}")
 
     print(f"Saved decoded images: {saved}")
     print(f"Output directory: {output_dir}")
