@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--output-dir")
     parser.add_argument("--device")
+    parser.add_argument("--eval-max-samples", type=int)
     return parser.parse_args()
 
 
@@ -57,6 +58,7 @@ def main():
         "epochs": args.epochs,
         "output_dir": args.output_dir,
         "device": args.device,
+        "eval_max_samples": args.eval_max_samples,
     }
     config = load_eeg_encoder_config(config_path=args.config, overrides=overrides)
     train_eeg_encoder(config)

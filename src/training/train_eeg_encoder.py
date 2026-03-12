@@ -56,6 +56,10 @@ class EEGEncoderConfig:
     eeg_l2_normalize: bool = True
     pin_memory: bool = False
 
+    # Evaluation default:
+    # Number of test samples to decode during eval when no CLI cap is provided.
+    eval_max_samples: Optional[int] = 16
+
 
 def load_eeg_encoder_config(
     config_path: str,
@@ -99,6 +103,11 @@ def load_eeg_encoder_config(
         output_dir=str(data.get("output_dir", "outputs/eeg_encoder")),
         eeg_l2_normalize=bool(data.get("eeg_l2_normalize", True)),
         pin_memory=bool(data.get("pin_memory", False)),
+        eval_max_samples=(
+            int(data["eval_max_samples"])
+            if data.get("eval_max_samples", None) is not None
+            else None
+        ),
     )
 
 

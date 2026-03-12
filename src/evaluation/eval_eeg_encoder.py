@@ -52,8 +52,11 @@ def parse_args():
     )
     parser.add_argument(
         "--pca-params-path",
-        default="latents/img_pca/pca_128.pt",
-        help="Path to PCA params with pca_mean and pca_components.",
+        default=None,
+        help=(
+            "Path to PCA params with pca_mean and pca_components. "
+            "If omitted or missing, auto-detect newest pca_*.pt in --latent-root."
+        ),
     )
     parser.add_argument(
         "--metadata-path",
@@ -163,10 +166,33 @@ def _load_scaling_factor(metadata_path: Path, vae: AutoencoderKL) -> float:
     return float(vae.config.scaling_factor)
 
 
+def _resolve_pca_params_path(pca_params_path: str | None, latent_root: str) -> Path:
+    if pca_params_path is not None:
+        candidate = Path(pca_params_path)
+        if candidate.exists():
+            return candidate
+        print(
+            f"Warning: --pca-params-path not found: {candidate}. "
+            "Falling back to auto-detection in latent-root."
+        )
+
+    root = Path(latent_root)
+    candidates = sorted(
+        [p for p in root.glob("pca_*.pt") if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"Could not find PCA params file. Expected pca_*.pt under: {root}"
+        )
+    resolved = candidates[0]
+    print(f"Using PCA params: {resolved}")
+    return resolved
+
+
 def main():
     args = parse_args()
-    if args.max_samples is None and args.num_images is not None:
-        args.max_samples = args.num_images
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device_t = torch.device(device)
@@ -178,6 +204,13 @@ def main():
     if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
         raise ValueError("Checkpoint must contain 'model_state_dict'.")
     saved_cfg = ckpt.get("config", {})
+
+    # Resolution order: --max-samples > --num-images(alias) > checkpoint/config default.
+    if args.max_samples is None:
+        if args.num_images is not None:
+            args.max_samples = args.num_images
+        elif saved_cfg.get("eval_max_samples", None) is not None:
+            args.max_samples = int(saved_cfg["eval_max_samples"])
 
     dataset_root = args.dataset_root or saved_cfg.get("dataset_root", "datasets")
     latent_root = args.latent_root or saved_cfg.get("latent_root", "latents/img_pca")
@@ -229,7 +262,11 @@ def main():
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    pca_params = _load_pt(Path(args.pca_params_path))
+    pca_params_path = _resolve_pca_params_path(
+        pca_params_path=args.pca_params_path,
+        latent_root=latent_root,
+    )
+    pca_params = _load_pt(pca_params_path)
     if not isinstance(pca_params, dict):
         raise TypeError("PCA params file must contain a dict.")
     if "pca_mean" not in pca_params or "pca_components" not in pca_params:

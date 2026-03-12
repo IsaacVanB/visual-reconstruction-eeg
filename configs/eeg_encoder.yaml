@@ -5,7 +5,7 @@ subject: sub-1
 split_seed: 0
 
 # Match latent PCA dimensionality.
-output_dim: 128
+output_dim: 256
 
 # EEG encoder architecture
 temporal_filters: 32
@@ -21,11 +21,12 @@ batch_size: 16
 num_workers: 0
 lr: 0.001
 weight_decay: 0.0001
-epochs: 20
+epochs: 5
 
 # Runtime/output
 device: cuda
 output_dir: outputs/eeg_encoder
+eval_max_samples: 16
 
 # Subset experiment control
 class_indices:

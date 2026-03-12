@@ -141,11 +141,11 @@ if [[ "$SKIP_BASELINE" -eq 1 ]]; then
   exit 0
 fi
 
-BASELINE_DIR="$RUN_DIR/baseline"
-mkdir -p "$BASELINE_DIR"
-printf 'Starting mean-image baseline evaluation...\n'
-python "$BASELINE_SCRIPT" \
-  --output-dir "$BASELINE_DIR" \
-  "${baseline_args[@]}"
-printf 'Baseline complete.\n'
-printf 'Baseline metrics: %s\n' "$BASELINE_DIR/baseline_metrics.json"
+#BASELINE_DIR="$RUN_DIR/baseline"
+#mkdir -p "$BASELINE_DIR"
+#printf 'Starting mean-image baseline evaluation...\n'
+#python "$BASELINE_SCRIPT" \
+#  --output-dir "$BASELINE_DIR" \
+#  "${baseline_args[@]}"
+#printf 'Baseline complete.\n'
+#printf 'Baseline metrics: %s\n' "$BASELINE_DIR/baseline_metrics.json"
