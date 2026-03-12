@@ -4,7 +4,6 @@ This file documents each tracked file in the repo and how to use it.
 
 ## Table of Contents
 
-- [Root Files](#root-files)
 - [Config Files](#config-files)
 - [Scripts](#scripts)
 - [Source: Data](#source-data)
@@ -13,40 +12,9 @@ This file documents each tracked file in the repo and how to use it.
 - [Source: Evaluation](#source-evaluation)
 - [Tests and Debug Utilities](#tests-and-debug-utilities)
 - [Notes](#notes)
-- [Notebooks](#notebooks)
-- [Figures](#figures)
 
-## Root Files
-
-`README.md`  
-Project overview and setup instructions.
-Example usage:
-```bash
-cat README.md
-```
-
-`LICENSE`  
-Repository license text.
-Example usage:
-```bash
-cat LICENSE
-```
-
-`requirements.txt`  
-Python dependencies for training/evaluation scripts.
-Example usage:
-```bash
-pip install -r requirements.txt
-```
 
 ## Config Files
-
-`configs/dummy_vae.yaml`  
-Default config for dummy VAE training.
-Example usage:
-```bash
-python scripts/train_dummy_vae.py --config configs/dummy_vae.yaml
-```
 
 `configs/eeg_encoder.yaml`  
 Default config for EEG encoder training against PCA latents.
@@ -56,25 +24,6 @@ python scripts/train_eeg_encoder.py --config configs/eeg_encoder.yaml
 ```
 
 ## Scripts
-
-`scripts/train_dummy_vae.py`  
-CLI wrapper for `src/training/train_dummy_vae.py`.
-Example usage (all CLI params):
-```bash
-python scripts/train_dummy_vae.py \
-  --config configs/dummy_vae.yaml \
-  --dataset-root datasets \
-  --epochs 10 \
-  --batch-size 32 \
-  --num-workers 0 \
-  --latent-dim 128 \
-  --lr 0.001 \
-  --kl-weight 0.001 \
-  --image-size 128 \
-  --split-seed 0 \
-  --output-dir outputs/dummy_vae \
-  --device cuda
-```
 
 `scripts/train_eeg_encoder.py`  
 CLI wrapper for EEG encoder training.
@@ -233,15 +182,6 @@ Example usage:
 from src.models import ConvVAE, EEGEncoderCNN
 ```
 
-`src/models/vae.py`  
-Convolutional VAE used for pipeline prototyping.
-Example usage:
-```python
-from src.models import ConvVAE
-
-model = ConvVAE(image_size=(128, 128), latent_dim=128)
-```
-
 `src/models/eeg_encoder.py`  
 CNN encoder for EEG input `[B, C, T]` with output embedding `[B, k]`.
 Example usage:
@@ -263,16 +203,6 @@ Example usage:
 from src.training import load_eeg_encoder_config, train_eeg_encoder
 ```
 
-`src/training/train_dummy_vae.py`  
-Core dummy-VAE training loop, config loader, artifact saving.
-Example usage:
-```python
-from src.training.train_dummy_vae import load_dummy_vae_config, train_dummy_vae
-
-cfg = load_dummy_vae_config("configs/dummy_vae.yaml")
-train_dummy_vae(cfg)
-```
-
 `src/training/train_eeg_encoder.py`  
 Core EEG-encoder training loop against latent targets (MSE), with timestamped artifacts.
 Example usage:
@@ -284,22 +214,6 @@ train_eeg_encoder(cfg)
 ```
 
 ## Source: Evaluation
-
-`src/evaluation/eval_dummy_vae.py`  
-Loads trained dummy VAE and writes reconstruction grid.
-Example usage (all CLI params):
-```bash
-python src/evaluation/eval_dummy_vae.py \
-  --checkpoint-path outputs/dummy_vae/dummy_vae.pt \
-  --dataset-root datasets \
-  --split valid \
-  --batch-size 16 \
-  --num-workers 0 \
-  --image-size 64 \
-  --split-seed 0 \
-  --num-images 8 \
-  --output-path outputs/dummy_vae/recon_grid.png
-```
 
 `src/evaluation/eval_eeg_encoder.py`  
 Runs EEG encoder on test set, inverse-PCA + VAE decode, saves reconstructions and a recon grid.
@@ -382,73 +296,4 @@ python tests/stable_diffusion_test.py \
   --steps 25 \
   --seed 0 \
   --fp16
-```
-
-## Notes
-
-`notes/EEG_ENCODER_NOTES.md`  
-Design checklist and change-safety guide for EEG encoder experiments.
-Example usage:
-```bash
-cat notes/EEG_ENCODER_NOTES.md
-```
-
-`notes/VAE_architecture_notes.md`  
-Design checklist for safely modifying VAE architecture/training.
-Example usage:
-```bash
-cat notes/VAE_architecture_notes.md
-```
-
-`notes/repo_structure.txt`  
-Planned/target repo layout and guidance.
-Example usage:
-```bash
-cat notes/repo_structure.txt
-```
-
-## Notebooks
-
-`notebooks/AE-ex1.ipynb`  
-Autoencoder experiment notebook.
-Example usage:
-```bash
-jupyter lab notebooks/AE-ex1.ipynb
-```
-
-`notebooks/VAE-ex1.ipynb`  
-VAE experiment notebook.
-Example usage:
-```bash
-jupyter lab notebooks/VAE-ex1.ipynb
-```
-
-`notebooks/g4g-vae-ex.ipynb`  
-Additional VAE exploration notebook.
-Example usage:
-```bash
-jupyter lab notebooks/g4g-vae-ex.ipynb
-```
-
-`notebooks/loading_data.ipynb`  
-Notebook for THINGS-EEG data loading inspection.
-Example usage:
-```bash
-jupyter lab notebooks/loading_data.ipynb
-```
-
-## Figures
-
-`figures/model.jpg`  
-Architecture diagram used in README.
-Example usage:
-```bash
-xdg-open figures/model.jpg
-```
-
-`figures/model.png`  
-Alternative format of architecture diagram.
-Example usage:
-```bash
-xdg-open figures/model.png
 ```
