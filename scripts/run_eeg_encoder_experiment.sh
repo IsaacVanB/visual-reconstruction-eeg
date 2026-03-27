@@ -3,10 +3,10 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run one EEG encoder experiment end-to-end:
+Run one EEG encoder experiment:
 1) Train EEG encoder into a timestamped run directory.
 2) Run eval_eeg_encoder.py using the produced checkpoint.
-3) Compute mean-image baseline (SSIM/LPIPS) on test split.
+3) (Optional, separate) run mean-image baseline script manually.
 
 Usage:
   scripts/run_eeg_encoder_experiment.sh [runner options] [train args ...] [--eval eval args ...] [--baseline baseline args ...]
@@ -15,13 +15,13 @@ Runner options:
   --output-base PATH   Base directory for runs (default: outputs/eeg_encoder)
   --run-name NAME      Explicit run directory name (default: run_YYYYMMDD_HHMMSS)
   --skip-eval          Train only; skip evaluation step
-  --skip-baseline      Skip mean-image baseline step
+  --skip-baseline      Ignored (baseline now runs as a separate script)
   --help               Show this help
 
 Argument forwarding:
   - Any args before '--eval' are passed to scripts/train_eeg_encoder.py
   - Any args between '--eval' and '--baseline' are passed to src/evaluation/eval_eeg_encoder.py
-  - Any args after '--baseline' are passed to src/evaluation/eval_mean_image_baseline.py
+  - Any args after '--baseline' are passed to scripts/eval_mean_image_baseline.py (manual run)
 
 Examples:
   scripts/run_eeg_encoder_experiment.sh
@@ -49,7 +49,7 @@ SKIP_EVAL=0
 SKIP_BASELINE=0
 TRAIN_SCRIPT="scripts/train_eeg_encoder.py"
 EVAL_SCRIPT="src/evaluation/eval_eeg_encoder.py"
-BASELINE_SCRIPT="src/evaluation/eval_mean_image_baseline.py"
+BASELINE_SCRIPT="scripts/eval_mean_image_baseline.py"
 
 train_args=()
 eval_args=()
@@ -136,16 +136,8 @@ else
   printf 'Expected grid: %s\n' "$EVAL_DIR/recon_grid.png"
 fi
 
-if [[ "$SKIP_BASELINE" -eq 1 ]]; then
-  printf 'Skipping baseline (--skip-baseline).\n'
-  exit 0
+if [[ "$SKIP_BASELINE" -eq 0 ]]; then
+  printf 'Baseline evaluation is now a separate step.\n'
+  printf 'Run manually when needed:\n'
+  printf '  python %s --output-dir %s/baseline %s\n' "$BASELINE_SCRIPT" "$RUN_DIR" "${baseline_args[*]:-}"
 fi
-
-#BASELINE_DIR="$RUN_DIR/baseline"
-#mkdir -p "$BASELINE_DIR"
-#printf 'Starting mean-image baseline evaluation...\n'
-#python "$BASELINE_SCRIPT" \
-#  --output-dir "$BASELINE_DIR" \
-#  "${baseline_args[@]}"
-#printf 'Baseline complete.\n'
-#printf 'Baseline metrics: %s\n' "$BASELINE_DIR/baseline_metrics.json"
