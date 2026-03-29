@@ -76,3 +76,20 @@ This note is a practical checklist for modifying the EEG encoder and training lo
 4. Try alternate losses (Huber, cosine).
 5. Expand class subset and longer training schedules.
 
+---
+## Overfitting
+
+- Dataset too small for model / model too big for dataset
+  - Look at sizes of others’ models
+- Dropout, regularization too weak
+- PCA dimension too large
+  - Currently 256
+- Fitting to noise
+  - Can try averaging the 4 trials per image
+- Can try increasing dataset size once stuff looks more promising
+- Validation loss increasing early can indicate:
+  - Learning rate too high
+  - Normalization wrong
+    - **★ Double check normalization at all points in pipeline ★**
+  - Target scale inconsistent
+    - **★ Not exactly sure what this means, look into this ★**
