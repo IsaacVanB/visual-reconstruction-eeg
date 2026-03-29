@@ -201,7 +201,7 @@ def _build_model_for_checkpoint(
         pool3=int(saved_cfg.get("pool3", 5)),
         dropout=float(saved_cfg.get("dropout", 0.3)),
     ).to(device)
-    print("Detected checkpoint architecture: legacy EEGNet-style CNN")
+    print("Detected checkpoint architecture: EEGNet-style CNN")
     return model
 
 
