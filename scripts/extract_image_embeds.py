@@ -74,6 +74,12 @@ def parse_args():
     parser.add_argument("--image-size", type=int, default=512, help="Square resize size.")
     parser.add_argument("--device", default=None, help="cuda, cpu, etc.")
     parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="Seed for deterministic train/valid/test image split within each class.",
+    )
+    parser.add_argument(
         "--class-indices",
         type=int,
         nargs="+",
@@ -111,6 +117,20 @@ def parse_args():
         "--no-explained-variance",
         action="store_true",
         help="Do not store explained_variance in PCA params file.",
+    )
+    parser.add_argument(
+        "--standardize-pca",
+        action="store_true",
+        help=(
+            "Standardize PCA outputs using train-set mean/std per component. "
+            "Applies same transform to valid split and stores stats in PCA params."
+        ),
+    )
+    parser.add_argument(
+        "--pca-std-eps",
+        type=float,
+        default=1e-6,
+        help="Minimum std when standardizing PCA outputs to avoid divide-by-zero.",
     )
     return parser.parse_args()
 
@@ -152,12 +172,28 @@ def _collect_dataset_info(dataset_root: Path, class_indices_raw):
         )
     num_classes = num_images // images_per_class
     class_indices = resolve_class_indices(class_indices_raw, num_classes)
-    selected_image_ids = []
+    return train_img_files, images_per_class, class_indices
+
+
+def _build_split_image_ids(
+    class_indices: np.ndarray,
+    images_per_class: int,
+    split_seed: int,
+) -> dict[str, list[int]]:
+    split_offsets = {
+        "train": (0, 8),
+        "valid": (8, 9),
+        "test": (9, 10),
+    }
+    rng = np.random.default_rng(split_seed)
+    split_ids = {"train": [], "valid": [], "test": []}
     for class_idx in class_indices:
         class_start = int(class_idx) * images_per_class
-        selected_image_ids.extend(range(class_start, class_start + images_per_class))
-
-    return train_img_files, images_per_class, class_indices, selected_image_ids
+        class_images = np.arange(class_start, class_start + images_per_class)
+        shuffled = rng.permutation(class_images).tolist()
+        for split_name, (start, end) in split_offsets.items():
+            split_ids[split_name].extend(int(x) for x in shuffled[start:end])
+    return split_ids
 
 
 def _extract_full_latents(
@@ -168,6 +204,7 @@ def _extract_full_latents(
     images_per_class: int,
     class_indices: np.ndarray,
     selected_image_ids,
+    split_image_ids: dict[str, list[int]],
 ) -> Path:
     latents_full_dir = output_root / args.full_dir_name
     latents_full_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +264,12 @@ def _extract_full_latents(
         "images_per_class": images_per_class,
         "class_indices": class_indices.tolist(),
         "num_images": int(total),
+        "split_seed": int(args.split_seed),
+        "split_num_images": {
+            "train": int(len(split_image_ids["train"])),
+            "valid": int(len(split_image_ids["valid"])),
+            "test": int(len(split_image_ids["test"])),
+        },
     }
     metadata_path = output_root / f"{args.full_dir_name}_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2))
@@ -234,16 +277,33 @@ def _extract_full_latents(
     return latents_full_dir
 
 
-def _run_pca(args, full_latent_dir: Path, output_root: Path) -> None:
+def _run_pca(
+    args,
+    full_latent_dir: Path,
+    output_root: Path,
+    train_image_ids: list[int],
+    valid_image_ids: list[int],
+) -> None:
     pca_dir = output_root / args.pca_dir_name
     pca_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = sorted([p for p in full_latent_dir.iterdir() if p.suffix.lower() == ".pt"])
-    if not paths:
-        raise RuntimeError(f"No .pt files found in {full_latent_dir}")
+    def _latent_path_for_id(image_id: int) -> Path:
+        padded = full_latent_dir / f"{int(image_id):06d}.pt"
+        if padded.exists():
+            return padded
+        plain = full_latent_dir / f"{int(image_id)}.pt"
+        if plain.exists():
+            return plain
+        raise FileNotFoundError(
+            f"Missing latent for image_id={image_id}. "
+            f"Expected {padded.name} (or {plain.name}) in {full_latent_dir}."
+        )
+
+    train_paths = [_latent_path_for_id(image_id) for image_id in train_image_ids]
+    valid_paths = [_latent_path_for_id(image_id) for image_id in valid_image_ids]
 
     flat_rows = []
-    for path in paths:
+    for path in train_paths:
         z = _load_pt_tensor(path).to(dtype=torch.float32, device="cpu")
         flat_rows.append(z.reshape(-1))
     x = torch.stack(flat_rows, dim=0)  # [N, D]
@@ -263,13 +323,34 @@ def _run_pca(args, full_latent_dir: Path, output_root: Path) -> None:
     x_centered = x - mean
     _, s, v_t = torch.linalg.svd(x_centered, full_matrices=False)
     components = v_t[:k]  # [k, D]
-    x_pca = x_centered @ components.T  # [N, k]
+    x_pca_train = x_centered @ components.T  # [N_train, k]
     explained_variance = (s[:k] ** 2) / max(n_samples - 1, 1)
 
+    # Optional z-score standardization in PCA space using train split only.
+    pca_train_mean = None
+    pca_train_std = None
+    if args.standardize_pca:
+        pca_train_mean = x_pca_train.mean(dim=0, keepdim=True)  # [1, k]
+        pca_train_std = x_pca_train.std(dim=0, unbiased=False, keepdim=True).clamp_min(
+            float(args.pca_std_eps)
+        )  # [1, k]
+        x_pca_train = (x_pca_train - pca_train_mean) / pca_train_std
+
     out_dtype = torch.float16 if args.pca_save_dtype == "float16" else torch.float32
-    for i, path in enumerate(paths):
+    for i, path in enumerate(train_paths):
         out_path = pca_dir / path.name
-        torch.save(x_pca[i].to(out_dtype), out_path)
+        torch.save(x_pca_train[i].to(out_dtype), out_path)
+
+    for path in valid_paths:
+        z = _load_pt_tensor(path).to(dtype=torch.float32, device="cpu")
+        z_flat = z.reshape(-1).unsqueeze(0)  # [1, D]
+        z_pca = (z_flat - mean) @ components.T  # [1, k]
+        if args.standardize_pca:
+            if pca_train_mean is None or pca_train_std is None:
+                raise RuntimeError("Internal error: missing PCA standardization stats.")
+            z_pca = (z_pca - pca_train_mean) / pca_train_std
+        out_path = pca_dir / path.name
+        torch.save(z_pca[0].to(out_dtype), out_path)
 
     pca_params_path = (
         Path(args.pca_params_path)
@@ -279,16 +360,56 @@ def _run_pca(args, full_latent_dir: Path, output_root: Path) -> None:
     pca_payload = {
         "pca_mean": mean[0].to(torch.float32),
         "pca_components": components.to(torch.float32),
+        "pca_standardized": bool(args.standardize_pca),
     }
+    if args.standardize_pca:
+        if pca_train_mean is None or pca_train_std is None:
+            raise RuntimeError("Internal error: missing PCA standardization stats.")
+        pca_payload["pca_train_mean"] = pca_train_mean[0].to(torch.float32)
+        pca_payload["pca_train_std"] = pca_train_std[0].to(torch.float32)
+        pca_payload["pca_std_eps"] = float(args.pca_std_eps)
     if not args.no_explained_variance:
         pca_payload["explained_variance"] = explained_variance.to(torch.float32)
     torch.save(pca_payload, pca_params_path)
 
-    print(f"Processed {len(paths)} embeddings from {full_latent_dir}")
-    print(f"Input flattened shape: ({n_samples}, {n_features})")
-    print(f"Output embedding shape per file: ({k},)")
+    pca_metadata = {
+        "pca_params_path": str(pca_params_path),
+        "pca_embedding_dir": str(pca_dir),
+        "n_components": int(k),
+        "n_features": int(n_features),
+        "fit_num_samples_train": int(n_samples),
+        "transform_num_samples_valid": int(len(valid_paths)),
+        "pca_save_dtype": args.pca_save_dtype,
+        "pca_standardized": bool(args.standardize_pca),
+        "pca_std_eps": float(args.pca_std_eps) if args.standardize_pca else None,
+        "pca_train_mean": (
+            pca_train_mean[0].to(torch.float32).cpu().tolist()
+            if args.standardize_pca and pca_train_mean is not None
+            else None
+        ),
+        "pca_train_std": (
+            pca_train_std[0].to(torch.float32).cpu().tolist()
+            if args.standardize_pca and pca_train_std is not None
+            else None
+        ),
+        "explained_variance": (
+            explained_variance.to(torch.float32).cpu().tolist()
+            if not args.no_explained_variance
+            else None
+        ),
+    }
+    pca_metadata_path = output_root / f"{args.pca_dir_name}_metadata.json"
+    pca_metadata_path.write_text(json.dumps(pca_metadata, indent=2))
+
+    print(f"Fitted PCA on train split only: {len(train_paths)} embeddings")
+    print(f"Applied same PCA transform to valid split: {len(valid_paths)} embeddings")
+    print(f"Input flattened train shape: ({n_samples}, {n_features})")
+    print(f"Output PCA embedding shape per file: ({k},)")
+    if args.standardize_pca:
+        print("PCA outputs standardized with train-set per-component mean/std.")
     print(f"Saved PCA embeddings to: {pca_dir}")
     print(f"Saved PCA params to: {pca_params_path}")
+    print(f"Saved PCA metadata to: {pca_metadata_path}")
 
 
 def main():
@@ -303,10 +424,16 @@ def main():
         output_root = repo_root / output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
-    train_img_files, images_per_class, class_indices, selected_image_ids = _collect_dataset_info(
+    train_img_files, images_per_class, class_indices = _collect_dataset_info(
         dataset_root=dataset_root,
         class_indices_raw=args.class_indices,
     )
+    split_image_ids = _build_split_image_ids(
+        class_indices=class_indices,
+        images_per_class=images_per_class,
+        split_seed=args.split_seed,
+    )
+    selected_image_ids = sorted(set(split_image_ids["train"] + split_image_ids["valid"]))
 
     full_latent_dir = output_root / args.full_dir_name
     if args.embedding_type in ("full", "both"):
@@ -318,6 +445,7 @@ def main():
             images_per_class=images_per_class,
             class_indices=class_indices,
             selected_image_ids=selected_image_ids,
+            split_image_ids=split_image_ids,
         )
     elif not full_latent_dir.exists():
         raise FileNotFoundError(
@@ -326,7 +454,13 @@ def main():
         )
 
     if args.embedding_type in ("pca", "both"):
-        _run_pca(args=args, full_latent_dir=full_latent_dir, output_root=output_root)
+        _run_pca(
+            args=args,
+            full_latent_dir=full_latent_dir,
+            output_root=output_root,
+            train_image_ids=split_image_ids["train"],
+            valid_image_ids=split_image_ids["valid"],
+        )
 
 
 if __name__ == "__main__":
