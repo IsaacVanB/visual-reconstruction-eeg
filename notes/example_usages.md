@@ -57,6 +57,8 @@ python scripts/train_eeg_encoder.py \
 Unified embedding pipeline:
 - extracts full SD-VAE latents (`img_full`)
 - optionally converts them to PCA latents (`img_pca`)
+- fits PCA on train split only and applies the same transform to valid split
+- optionally standardizes PCA coefficients using train-set mean/std
 - writes metadata + PCA params
 Example usage (all CLI params):
 ```bash
@@ -67,16 +69,23 @@ python scripts/extract_image_embeds.py \
   --vae-name stabilityai/sd-vae-ft-mse \
   --image-size 512 \
   --device cuda \
+  --split-seed 0 \
   --class-indices 0 2 4 6 8 \
   --full-dir-name img_full \
   --pca-dir-name img_pca \
   --n-components 128 \
   --pca-save-dtype float32 \
-  --pca-params-path latents/img_pca/pca_128.pt
+  --pca-params-path latents/img_pca/pca_128.pt \
+  --standardize-pca \
+  --pca-std-eps 1e-6
 ```
 Optional PCA flag:
 ```bash
-python scripts/extract_image_embeds.py --embedding-type pca --output-root latents --n-components 128 --no-explained-variance
+python scripts/extract_image_embeds.py \
+  --embedding-type pca \
+  --output-root latents \
+  --n-components 128 \
+  --no-explained-variance
 ```
 
 `scripts/latent_decode.py`  
@@ -98,7 +107,7 @@ python scripts/latent_decode.py --latent-path some_pred.pt --latent-key predicti
 ```
 
 `scripts/run_eeg_encoder_experiment.sh`  
-End-to-end experiment runner: train -> evaluate -> mean-image baseline.
+Experiment runner: train -> evaluate.
 Example usage:
 ```bash
 bash scripts/run_eeg_encoder_experiment.sh
@@ -108,16 +117,29 @@ Runner options:
 bash scripts/run_eeg_encoder_experiment.sh \
   --output-base outputs/eeg_encoder \
   --run-name my_run \
-  --skip-eval \
-  --skip-baseline
+  --skip-eval
 ```
-Forwarding train/eval/baseline args:
+Forwarding train/eval args:
 ```bash
 bash scripts/run_eeg_encoder_experiment.sh \
   --config configs/eeg_encoder.yaml \
   --epochs 40 \
-  --eval --max-samples 16 --grid-images 8 \
-  --baseline --image-size 256 --batch-size 64
+  --eval --max-samples 16 --grid-images 8
+```
+Mean-image baseline is now a separate script run:
+```bash
+python scripts/eval_mean_image_baseline.py \
+  --dataset-root datasets \
+  --split-seed 0 \
+  --class-indices 0 2 4 6 8 \
+  --mean-mode class \
+  --image-size 256 \
+  --batch-size 32 \
+  --num-workers 0 \
+  --device cuda \
+  --lpips-net alex \
+  --output-dir outputs/eeg_encoder/mean_baseline \
+  --metrics-name baseline_metrics.json
 ```
 
 ## Source: Data
@@ -179,7 +201,7 @@ img_tf = build_image_transform(image_size=(256, 256), mean=(0.5, 0.5, 0.5), std=
 Exports model classes.
 Example usage:
 ```python
-from src.models import ConvVAE, EEGEncoderCNN
+from src.models import EEGEncoderCNN
 ```
 
 `src/models/eeg_encoder.py`  
@@ -228,6 +250,7 @@ python src/evaluation/eval_eeg_encoder.py \
   --class-indices 0 2 4 6 8 \
   --pca-params-path latents/img_pca/pca_128.pt \
   --metadata-path latents/img_full_metadata.json \
+  --decode-latent-scaling auto \
   --vae-name stabilityai/sd-vae-ft-mse \
   --latent-shape 4 64 64 \
   --batch-size 4 \
@@ -239,23 +262,38 @@ python src/evaluation/eval_eeg_encoder.py \
   --output-dir outputs/decoded_eeg_img
 ```
 
-`src/evaluation/eval_mean_image_baseline.py`  
-Computes mean-image baseline and reports SSIM/LPIPS on test split.
+`src/evaluation/eval_eeg_with_mean_baselines.py`  
+Evaluates EEG reconstructions and compares against global/class train mean baselines (SSIM/LPIPS).
 Example usage (all CLI params):
 ```bash
-python src/evaluation/eval_mean_image_baseline.py \
+python src/evaluation/eval_eeg_with_mean_baselines.py \
+  --checkpoint-path outputs/eeg_encoder/run_20260312_185501/run_20260312_185501.pt \
   --dataset-root datasets \
+  --latent-root latents/img_pca \
+  --subject sub-1 \
   --split-seed 0 \
   --class-indices 0 2 4 6 8 \
-  --image-size 256 \
-  --batch-size 32 \
+  --pca-params-path latents/img_pca/pca_128.pt \
+  --metadata-path latents/img_full_metadata.json \
+  --decode-latent-scaling auto \
+  --vae-name stabilityai/sd-vae-ft-mse \
+  --latent-shape 4 64 64 \
+  --image-size 512 \
+  --batch-size 4 \
   --num-workers 0 \
+  --max-samples 16 \
   --device cuda \
   --lpips-net alex \
-  --output-dir outputs/eeg_encoder/mean_baseline \
-  --mean-image-name mean_image.png \
-  --metrics-name baseline_metrics.json
+  --output-dir outputs/eeg_encoder/run_20260312_185501/baseline_eval \
+  --metrics-name eeg_vs_baselines_metrics.json
 ```
+Auto-run mode (no args): picks latest run under `outputs/eeg_encoder` and writes to `<run>/baseline_eval`.
+
+`src/evaluation/eeg_eval_core.py`  
+Shared evaluation core used by both EEG eval scripts (checkpoint/model loading, PCA inversion, decode scaling, image loading).
+
+`src/evaluation/eval_mean_image_baseline.py`  
+Compatibility wrapper that forwards to `scripts/eval_mean_image_baseline.py`.
 
 ## Tests and Debug Utilities
 

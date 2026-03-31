@@ -1,8 +1,6 @@
 import argparse
-import json
 from pathlib import Path
 import sys
-import warnings
 
 from diffusers import AutoencoderKL
 import numpy as np
@@ -14,14 +12,17 @@ repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 
 from src.data import EEGImageLatentDataset, build_eeg_transform
-from src.models import EEGEncoderCNN
-
-# Silence known huggingface_hub deprecation emitted by some model download paths.
-warnings.filterwarnings(
-    "ignore",
-    message=".*local_dir_use_symlinks.*deprecated and ignored.*",
-    category=UserWarning,
-    module="huggingface_hub.utils._validators",
+from src.evaluation.eeg_eval_core import (
+    build_model_for_checkpoint,
+    decode_from_pca_prediction,
+    load_checkpoint,
+    load_ground_truth_tensor,
+    load_metadata,
+    load_pca_projection,
+    load_scaling_factor,
+    resolve_decode_latent_scaling_mode,
+    resolve_eval_overrides,
+    resolve_pca_params_path,
 )
 
 
@@ -64,6 +65,16 @@ def parse_args():
         help="Path to metadata json containing scaling_factor.",
     )
     parser.add_argument(
+        "--decode-latent-scaling",
+        default="auto",
+        choices=["auto", "divide", "none"],
+        help=(
+            "How to adapt predicted VAE latents before decode. "
+            "'auto' infers from metadata; 'divide' uses z/scaling_factor; "
+            "'none' decodes z directly."
+        ),
+    )
+    parser.add_argument(
         "--vae-name",
         default="stabilityai/sd-vae-ft-mse",
         help="Diffusers VAE model id.",
@@ -93,13 +104,6 @@ def parse_args():
     parser.add_argument("--device", default=None, help="cuda, cpu, etc.")
     parser.add_argument("--output-dir", default="outputs/decoded_eeg_img")
     return parser.parse_args()
-
-
-def _load_pt(path: Path):
-    try:
-        return torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        return torch.load(path, map_location="cpu")
 
 
 def _tensor_to_pil(image_chw_01: torch.Tensor) -> Image.Image:
@@ -137,60 +141,6 @@ def _build_reconstruction_grid(
     return Image.fromarray(canvas)
 
 
-def _resolve_image_path(image_root: Path, image_name: str) -> Path:
-    if "/" in image_name or "\\" in image_name:
-        rel_path = Path(image_name)
-    else:
-        class_name = image_name.rsplit("_", 1)[0]
-        rel_path = Path(class_name) / image_name
-    return image_root / rel_path
-
-
-def _load_ground_truth_tensor(
-    image_root: Path, image_name: str, width: int, height: int
-) -> torch.Tensor:
-    image_path = _resolve_image_path(image_root=image_root, image_name=image_name)
-    if not image_path.exists():
-        raise FileNotFoundError(f"Ground-truth image file not found: {image_path}")
-    with Image.open(image_path) as pil_image:
-        image = pil_image.convert("RGB").resize((width, height), resample=Image.BICUBIC)
-    image_np = np.asarray(image, dtype=np.float32) / 255.0
-    return torch.from_numpy(image_np).permute(2, 0, 1).contiguous()
-
-
-def _load_scaling_factor(metadata_path: Path, vae: AutoencoderKL) -> float:
-    if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text())
-        if "scaling_factor" in metadata:
-            return float(metadata["scaling_factor"])
-    return float(vae.config.scaling_factor)
-
-
-def _resolve_pca_params_path(pca_params_path: str | None, latent_root: str) -> Path:
-    if pca_params_path is not None:
-        candidate = Path(pca_params_path)
-        if candidate.exists():
-            return candidate
-        print(
-            f"Warning: --pca-params-path not found: {candidate}. "
-            "Falling back to auto-detection in latent-root."
-        )
-
-    root = Path(latent_root)
-    candidates = sorted(
-        [p for p in root.glob("pca_*.pt") if p.is_file()],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        raise FileNotFoundError(
-            f"Could not find PCA params file. Expected pca_*.pt under: {root}"
-        )
-    resolved = candidates[0]
-    print(f"Using PCA params: {resolved}")
-    return resolved
-
-
 def main():
     args = parse_args()
 
@@ -200,29 +150,23 @@ def main():
     checkpoint_path = Path(args.checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    ckpt = _load_pt(checkpoint_path)
-    if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
-        raise ValueError("Checkpoint must contain 'model_state_dict'.")
-    saved_cfg = ckpt.get("config", {})
+    ckpt, saved_cfg = load_checkpoint(checkpoint_path)
 
-    # Resolution order: --max-samples > --num-images(alias) > checkpoint/config default.
     if args.max_samples is None:
         if args.num_images is not None:
             args.max_samples = args.num_images
         elif saved_cfg.get("eval_max_samples", None) is not None:
             args.max_samples = int(saved_cfg["eval_max_samples"])
 
-    dataset_root = args.dataset_root or saved_cfg.get("dataset_root", "datasets")
-    latent_root = args.latent_root or saved_cfg.get("latent_root", "latents/img_pca")
-    subject = args.subject or saved_cfg.get("subject", "sub-1")
-    split_seed = args.split_seed if args.split_seed is not None else int(saved_cfg.get("split_seed", 0))
-    class_indices = (
-        args.class_indices
-        if args.class_indices is not None
-        else ckpt.get("class_indices", saved_cfg.get("class_indices"))
+    dataset_root, latent_root, subject, split_seed, class_indices = resolve_eval_overrides(
+        saved_cfg=saved_cfg,
+        ckpt=ckpt,
+        dataset_root=args.dataset_root,
+        latent_root=args.latent_root,
+        subject=args.subject,
+        split_seed=args.split_seed,
+        class_indices=args.class_indices,
     )
-    if class_indices is not None:
-        class_indices = [int(x) for x in class_indices]
 
     eeg_tf = build_eeg_transform(
         normalize_per_sample=bool(saved_cfg.get("eeg_l2_normalize", True)),
@@ -247,48 +191,42 @@ def main():
     )
 
     sample_eeg, sample_latent, _ = dataset[0]
-    model = EEGEncoderCNN(
-        eeg_channels=int(sample_eeg.shape[0]),
-        eeg_timesteps=int(sample_eeg.shape[1]),
-        output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
-        temporal_filters=int(saved_cfg.get("temporal_filters", 32)),
-        depth_multiplier=int(saved_cfg.get("depth_multiplier", 2)),
-        temporal_kernel1=int(saved_cfg.get("temporal_kernel1", 51)),
-        temporal_kernel3=int(saved_cfg.get("temporal_kernel3", 13)),
-        pool1=int(saved_cfg.get("pool1", 2)),
-        pool3=int(saved_cfg.get("pool3", 5)),
-        dropout=float(saved_cfg.get("dropout", 0.3)),
-    ).to(device_t)
+    model = build_model_for_checkpoint(
+        model_state_dict=ckpt["model_state_dict"],
+        sample_eeg=sample_eeg,
+        sample_latent=sample_latent,
+        saved_cfg=saved_cfg,
+        device=device_t,
+    )
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    pca_params_path = _resolve_pca_params_path(
+    pca_params_path = resolve_pca_params_path(
         pca_params_path=args.pca_params_path,
         latent_root=latent_root,
     )
-    pca_params = _load_pt(pca_params_path)
-    if not isinstance(pca_params, dict):
-        raise TypeError("PCA params file must contain a dict.")
-    if "pca_mean" not in pca_params or "pca_components" not in pca_params:
-        raise KeyError("PCA params must contain 'pca_mean' and 'pca_components'.")
-    pca_mean = pca_params["pca_mean"].to(device=device_t, dtype=torch.float32).flatten()  # [D]
-    pca_components = pca_params["pca_components"].to(device=device_t, dtype=torch.float32)  # [k, D]
-    if pca_components.ndim != 2:
-        raise ValueError(f"Expected pca_components [k, D], got {tuple(pca_components.shape)}")
-    pca_k, pca_d = pca_components.shape
-    if int(saved_cfg.get("output_dim", pca_k)) != pca_k:
+    pca = load_pca_projection(
+        pca_params_path=pca_params_path,
+        device=device_t,
+    )
+    if int(saved_cfg.get("output_dim", pca["k"])) != int(pca["k"]):
         raise ValueError(
-            f"Encoder output_dim ({saved_cfg.get('output_dim')}) does not match PCA k ({pca_k})."
+            f"Encoder output_dim ({saved_cfg.get('output_dim')}) does not match PCA k ({pca['k']})."
         )
 
     c, h, w = args.latent_shape
-    if c * h * w != pca_d:
+    if c * h * w != int(pca["d"]):
         raise ValueError(
-            f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca_d}."
+            f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}."
         )
 
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device_t).eval()
-    scaling_factor = _load_scaling_factor(Path(args.metadata_path), vae)
+    metadata = load_metadata(Path(args.metadata_path))
+    scaling_factor = load_scaling_factor(Path(args.metadata_path), vae)
+    decode_scaling_mode = resolve_decode_latent_scaling_mode(
+        mode_arg=args.decode_latent_scaling,
+        metadata=metadata,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -298,8 +236,10 @@ def main():
 
     print(f"Device: {device_t}")
     print(f"Test samples: {len(dataset)}")
-    print(f"PCA shape: k={pca_k}, D={pca_d}")
+    print(f"PCA shape: k={pca['k']}, D={pca['d']}")
     print(f"Scaling factor: {scaling_factor}")
+    print(f"PCA standardized: {pca['standardized']}")
+    print(f"Decode latent scaling mode: {decode_scaling_mode}")
     saved = 0
     originals_for_grid = []
     recons_for_grid = []
@@ -312,21 +252,22 @@ def main():
             if remaining <= 0:
                 break
 
-            # Enforce reconstruction cap before model forward/decode to avoid OOM.
-            eeg = eeg[:remaining]
+            eeg = eeg[:remaining].to(device=device_t, dtype=torch.float32)
             labels = labels[:remaining]
 
-            eeg = eeg.to(device=device_t, dtype=torch.float32)
-            pred_pca = model(eeg)  # [B, k]
-            if pred_pca.shape[1] != pca_k:
+            pred_pca = model(eeg)
+            if pred_pca.shape[1] != int(pca["k"]):
                 raise RuntimeError(
-                    f"Predicted latent dim {pred_pca.shape[1]} does not match PCA k={pca_k}."
+                    f"Predicted latent dim {pred_pca.shape[1]} does not match PCA k={pca['k']}."
                 )
-
-            z_full = pca_mean.unsqueeze(0) + pred_pca @ pca_components  # [B, D]
-            z_vae = z_full.view(-1, c, h, w)
-            recon = vae.decode(z_vae / scaling_factor).sample
-            recon_01 = (recon.clamp(-1.0, 1.0) + 1.0) / 2.0
+            recon_01 = decode_from_pca_prediction(
+                pred_pca=pred_pca,
+                pca=pca,
+                latent_shape=(c, h, w),
+                vae=vae,
+                scaling_factor=scaling_factor,
+                decode_scaling_mode=decode_scaling_mode,
+            )
             _, _, recon_h, recon_w = recon_01.shape
 
             for j in range(recon_01.size(0)):
@@ -341,7 +282,7 @@ def main():
                 _tensor_to_pil(recon_01[j]).save(output_dir / out_name)
                 if len(originals_for_grid) < args.grid_images:
                     image_name = dataset.train_img_files[int(image_index)]
-                    gt = _load_ground_truth_tensor(
+                    gt = load_ground_truth_tensor(
                         image_root=image_root,
                         image_name=image_name,
                         width=int(recon_w),

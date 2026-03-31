@@ -6,7 +6,7 @@ usage() {
 Run one EEG encoder experiment:
 1) Train EEG encoder into a timestamped run directory.
 2) Run eval_eeg_encoder.py using the produced checkpoint.
-3) (Optional, separate) run mean-image baseline script manually.
+3) Run eval_eeg_with_mean_baselines.py for model-vs-baseline metrics.
 
 Usage:
   scripts/run_eeg_encoder_experiment.sh [runner options] [train args ...] [--eval eval args ...] [--baseline baseline args ...]
@@ -15,13 +15,13 @@ Runner options:
   --output-base PATH   Base directory for runs (default: outputs/eeg_encoder)
   --run-name NAME      Explicit run directory name (default: run_YYYYMMDD_HHMMSS)
   --skip-eval          Train only; skip evaluation step
-  --skip-baseline      Ignored (baseline now runs as a separate script)
+  --skip-baseline      Skip eval_eeg_with_mean_baselines.py step
   --help               Show this help
 
 Argument forwarding:
   - Any args before '--eval' are passed to scripts/train_eeg_encoder.py
   - Any args between '--eval' and '--baseline' are passed to src/evaluation/eval_eeg_encoder.py
-  - Any args after '--baseline' are passed to scripts/eval_mean_image_baseline.py (manual run)
+  - Any args after '--baseline' are passed to src/evaluation/eval_eeg_with_mean_baselines.py
 
 Examples:
   scripts/run_eeg_encoder_experiment.sh
@@ -39,7 +39,7 @@ Examples:
 
   scripts/run_eeg_encoder_experiment.sh \
     --eval --max-samples 16 --grid-images 8 \
-    --baseline --image-size 256 --batch-size 64
+    --baseline --image-size 512 --batch-size 4
 EOF
 }
 
@@ -49,7 +49,7 @@ SKIP_EVAL=0
 SKIP_BASELINE=0
 TRAIN_SCRIPT="scripts/train_eeg_encoder.py"
 EVAL_SCRIPT="src/evaluation/eval_eeg_encoder.py"
-BASELINE_SCRIPT="scripts/eval_mean_image_baseline.py"
+BASELINE_EVAL_SCRIPT="src/evaluation/eval_eeg_with_mean_baselines.py"
 
 train_args=()
 eval_args=()
@@ -136,8 +136,17 @@ else
   printf 'Expected grid: %s\n' "$EVAL_DIR/recon_grid.png"
 fi
 
-if [[ "$SKIP_BASELINE" -eq 0 ]]; then
-  printf 'Baseline evaluation is now a separate step.\n'
-  printf 'Run manually when needed:\n'
-  printf '  python %s --output-dir %s/baseline %s\n' "$BASELINE_SCRIPT" "$RUN_DIR" "${baseline_args[*]:-}"
+if [[ "$SKIP_BASELINE" -eq 1 ]]; then
+  printf 'Skipping baseline comparison eval (--skip-baseline).\n'
+  exit 0
 fi
+
+BASELINE_EVAL_DIR="$RUN_DIR/baseline_eval"
+mkdir -p "$BASELINE_EVAL_DIR"
+printf 'Starting baseline comparison evaluation...\n'
+python "$BASELINE_EVAL_SCRIPT" \
+  --checkpoint-path "$checkpoint_path" \
+  --output-dir "$BASELINE_EVAL_DIR" \
+  "${baseline_args[@]}"
+printf 'Baseline comparison evaluation complete.\n'
+printf 'Baseline metrics: %s\n' "$BASELINE_EVAL_DIR/eeg_vs_baselines_metrics.json"
