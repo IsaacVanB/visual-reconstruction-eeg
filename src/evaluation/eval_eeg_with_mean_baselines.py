@@ -273,9 +273,9 @@ def main():
 
     if args.output_dir is None:
         if run_dir is None:
-            output_dir = runs_base / "baseline_eval"
+            output_dir = runs_base / "eval"
         else:
-            output_dir = run_dir / "baseline_eval"
+            output_dir = run_dir / "eval"
         print(f"Auto-selected output directory: {output_dir}")
     else:
         output_dir = Path(args.output_dir)

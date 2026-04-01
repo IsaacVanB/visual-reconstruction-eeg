@@ -53,6 +53,16 @@ def parse_args():
         help="Path to metadata json containing scaling_factor for inverse scaling.",
     )
     parser.add_argument(
+        "--decode-latent-scaling",
+        default="auto",
+        choices=["auto", "divide", "none"],
+        help=(
+            "How to adapt VAE latents before decode. "
+            "'auto' infers from metadata; 'divide' uses z/scaling_factor; "
+            "'none' decodes z directly."
+        ),
+    )
+    parser.add_argument(
         "--latent-key",
         default=None,
         help="Optional key if latent-path stores a dict instead of a tensor.",
@@ -137,6 +147,19 @@ def main():
     if pca_mean.numel() != d:
         raise ValueError(f"pca_mean length {pca_mean.numel()} does not match PCA D={d}.")
 
+    # If PCA targets were standardized during extraction, undo it first.
+    if bool(pca_params.get("pca_standardized", False)):
+        if "pca_train_mean" not in pca_params or "pca_train_std" not in pca_params:
+            raise KeyError(
+                "PCA params indicate standardized latents but are missing "
+                "'pca_train_mean'/'pca_train_std'."
+            )
+        pca_train_mean = pca_params["pca_train_mean"].to(dtype=torch.float32).flatten()
+        pca_train_std = pca_params["pca_train_std"].to(dtype=torch.float32).flatten()
+        if pca_train_mean.numel() != k or pca_train_std.numel() != k:
+            raise ValueError("PCA standardization stats shape does not match PCA k.")
+        z_pca = z_pca * pca_train_std + pca_train_mean
+
     # Inverse PCA: x = mean + z @ components
     z_full = pca_mean + (z_pca.unsqueeze(0) @ pca_components).squeeze(0)  # [D]
 
@@ -151,6 +174,7 @@ def main():
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device).eval()
     z_vae = z_vae.to(device=device, dtype=torch.float32)
 
+    metadata = {}
     scaling_factor = None
     if metadata_path.exists():
         metadata = json.loads(metadata_path.read_text())
@@ -159,9 +183,20 @@ def main():
     if scaling_factor is None:
         scaling_factor = float(vae.config.scaling_factor)
 
+    decode_scaling_mode = args.decode_latent_scaling
+    if decode_scaling_mode == "auto":
+        latent_def = str(metadata.get("latent_definition", "")).lower()
+        if "posterior.mean" in latent_def:
+            decode_scaling_mode = "none"
+        else:
+            decode_scaling_mode = "divide"
+
     with torch.no_grad():
-        # Inverse scaling before decode.
-        recon = vae.decode(z_vae / scaling_factor).sample  # usually in [-1, 1]
+        if decode_scaling_mode == "divide":
+            decode_latents = z_vae / scaling_factor
+        else:
+            decode_latents = z_vae
+        recon = vae.decode(decode_latents).sample  # usually in [-1, 1]
         recon_01 = (recon.clamp(-1.0, 1.0) + 1.0) / 2.0
 
     out_img = tensor_to_pil(recon_01[0])
@@ -170,6 +205,7 @@ def main():
     print(f"Latent PCA dim: {k}")
     print(f"Recovered latent shape: {tuple(z_vae.shape)}")
     print(f"Used inverse scaling factor: {scaling_factor}")
+    print(f"Decode latent scaling mode: {decode_scaling_mode}")
 
 
 if __name__ == "__main__":

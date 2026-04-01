@@ -15,6 +15,7 @@ from src.models import EEGEncoderCNN
 
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
+MODEL_ARCHITECTURE_ID = "eeg_encoder_cnn_2d_eegnet_v1"
 
 
 @dataclass
@@ -31,6 +32,7 @@ class EEGEncoderConfig:
     # Model architecture knobs:
     # - output_dim MUST match PCA latent dimension (k) used as target.
     # - temporal_* and pooling values control temporal receptive field/compression.
+    model_architecture: str = MODEL_ARCHITECTURE_ID
     output_dim: int = 512
     temporal_filters: int = 32
     depth_multiplier: int = 2
@@ -86,6 +88,7 @@ def load_eeg_encoder_config(
         subject=str(data.get("subject", "sub-1")),
         split_seed=int(data.get("split_seed", 0)),
         class_indices=tuple(int(x) for x in class_indices),
+        model_architecture=str(data.get("model_architecture", MODEL_ARCHITECTURE_ID)),
         output_dim=int(data.get("output_dim", 512)),
         temporal_filters=int(data.get("temporal_filters", 32)),
         depth_multiplier=int(data.get("depth_multiplier", 2)),
@@ -185,11 +188,14 @@ def _save_artifacts(
 ) -> dict[str, Path]:
     saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
     ckpt_path = output_dir / f"eeg_encoder_{saved_at}.pt"
+    config_payload = dict(config.__dict__)
+    config_payload["model_architecture"] = MODEL_ARCHITECTURE_ID
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "config": config.__dict__,
+            "config": config_payload,
             "class_indices": list(config.class_indices),
+            "model_architecture": MODEL_ARCHITECTURE_ID,
             "saved_at": saved_at,
         },
         ckpt_path,

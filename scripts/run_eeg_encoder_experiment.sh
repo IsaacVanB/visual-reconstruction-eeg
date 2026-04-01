@@ -141,7 +141,7 @@ if [[ "$SKIP_BASELINE" -eq 1 ]]; then
   exit 0
 fi
 
-BASELINE_EVAL_DIR="$RUN_DIR/baseline_eval"
+BASELINE_EVAL_DIR="$RUN_DIR/eval"
 mkdir -p "$BASELINE_EVAL_DIR"
 printf 'Starting baseline comparison evaluation...\n'
 python "$BASELINE_EVAL_SCRIPT" \

@@ -15,11 +15,13 @@ from src.data import EEGImageLatentDataset, build_eeg_transform
 from src.evaluation.eeg_eval_core import (
     build_model_for_checkpoint,
     decode_from_pca_prediction,
+    find_latest_run_dir,
     load_checkpoint,
     load_ground_truth_tensor,
     load_metadata,
     load_pca_projection,
     load_scaling_factor,
+    resolve_checkpoint_for_run,
     resolve_decode_latent_scaling_mode,
     resolve_eval_overrides,
     resolve_pca_params_path,
@@ -32,7 +34,7 @@ def parse_args():
     )
     parser.add_argument(
         "--checkpoint-path",
-        default="outputs/eeg_encoder/eeg_encoder.pt",
+        default=None,
         help="Path to trained EEG encoder checkpoint.",
     )
     parser.add_argument("--dataset-root", default=None, help="Override dataset root from checkpoint.")
@@ -102,7 +104,7 @@ def parse_args():
         help="Number of columns in recon_grid.png (ground truth over reconstruction).",
     )
     parser.add_argument("--device", default=None, help="cuda, cpu, etc.")
-    parser.add_argument("--output-dir", default="outputs/decoded_eeg_img")
+    parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
 
 
@@ -147,7 +149,17 @@ def main():
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device_t = torch.device(device)
 
-    checkpoint_path = Path(args.checkpoint_path)
+    runs_base = repo_root / "outputs" / "eeg_encoder"
+    run_dir: Path | None = None
+    if args.checkpoint_path is None:
+        run_dir = find_latest_run_dir(runs_base)
+        checkpoint_path = resolve_checkpoint_for_run(run_dir)
+        print(f"Auto-selected latest run: {run_dir}")
+        print(f"Auto-selected checkpoint: {checkpoint_path}")
+    else:
+        checkpoint_path = Path(args.checkpoint_path)
+        if checkpoint_path.parent.name.startswith("run_"):
+            run_dir = checkpoint_path.parent
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     ckpt, saved_cfg = load_checkpoint(checkpoint_path)
@@ -228,7 +240,14 @@ def main():
         metadata=metadata,
     )
 
-    output_dir = Path(args.output_dir)
+    if args.output_dir is None:
+        if run_dir is None:
+            output_dir = runs_base / "eval"
+        else:
+            output_dir = run_dir / "eval"
+        print(f"Auto-selected output directory: {output_dir}")
+    else:
+        output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     image_root = Path(dataset_root) / "images_THINGS" / "object_images"
     if not image_root.exists():

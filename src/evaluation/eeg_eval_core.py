@@ -148,12 +148,36 @@ def build_model_for_checkpoint(
     saved_cfg: dict,
     device: torch.device,
 ) -> nn.Module:
+    explicit_architecture = str(saved_cfg.get("model_architecture", "")).lower()
+    if "1d" in explicit_architecture:
+        model = EEGEncoderCNN1D(
+            eeg_channels=int(sample_eeg.shape[0]),
+            output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
+        ).to(device)
+        print(f"Detected checkpoint architecture: {saved_cfg.get('model_architecture')}")
+        return model
+    if "2d" in explicit_architecture or "eegnet" in explicit_architecture:
+        model = EEGEncoderCNN(
+            eeg_channels=int(sample_eeg.shape[0]),
+            eeg_timesteps=int(sample_eeg.shape[1]),
+            output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
+            temporal_filters=int(saved_cfg.get("temporal_filters", 32)),
+            depth_multiplier=int(saved_cfg.get("depth_multiplier", 2)),
+            temporal_kernel1=int(saved_cfg.get("temporal_kernel1", 51)),
+            temporal_kernel3=int(saved_cfg.get("temporal_kernel3", 13)),
+            pool1=int(saved_cfg.get("pool1", 2)),
+            pool3=int(saved_cfg.get("pool3", 5)),
+            dropout=float(saved_cfg.get("dropout", 0.3)),
+        ).to(device)
+        print(f"Detected checkpoint architecture: {saved_cfg.get('model_architecture')}")
+        return model
+
     if is_1d_checkpoint(model_state_dict):
         model = EEGEncoderCNN1D(
             eeg_channels=int(sample_eeg.shape[0]),
             output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
         ).to(device)
-        print("Detected checkpoint architecture: 1D CNN")
+        print("Detected checkpoint architecture: 1D CNN (inferred)")
         return model
 
     model = EEGEncoderCNN(
@@ -168,7 +192,7 @@ def build_model_for_checkpoint(
         pool3=int(saved_cfg.get("pool3", 5)),
         dropout=float(saved_cfg.get("dropout", 0.3)),
     ).to(device)
-    print("Detected checkpoint architecture: EEGNet-style CNN")
+    print("Detected checkpoint architecture: EEGNet-style CNN (inferred)")
     return model
 
 
@@ -312,4 +336,3 @@ def load_ground_truth_tensor(
         image = pil_image.convert("RGB").resize((width, height), resample=Image.BICUBIC)
     image_np = np.asarray(image, dtype=np.float32) / 255.0
     return torch.from_numpy(image_np).permute(2, 0, 1).contiguous()
-
