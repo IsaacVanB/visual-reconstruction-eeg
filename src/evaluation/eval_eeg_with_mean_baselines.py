@@ -4,10 +4,10 @@ from pathlib import Path
 import sys
 import warnings
 
-from diffusers import AutoencoderKL
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import numpy as np
 
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
@@ -16,8 +16,11 @@ from src.data import EEGImageLatentDataset, build_eeg_transform, build_image_dat
 from src.evaluation.eeg_eval_core import (
     build_model_for_checkpoint,
     decode_from_pca_prediction,
+    filter_image_indices_to_existing_files,
+    filter_sample_index_to_existing_files,
     find_latest_run_dir,
     load_checkpoint,
+    load_autoencoder_kl_class,
     load_ground_truth_tensor,
     load_metadata,
     load_pca_projection,
@@ -26,6 +29,7 @@ from src.evaluation.eeg_eval_core import (
     resolve_decode_latent_scaling_mode,
     resolve_eval_overrides,
     resolve_pca_params_path,
+    resolve_torch_device,
 )
 
 
@@ -150,8 +154,7 @@ def main():
     args = parse_args()
     StructuralSimilarityIndexMeasure, lpips = _load_metrics_deps()
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    device_t = torch.device(device)
+    device_t = resolve_torch_device(args.device)
 
     runs_base = repo_root / "outputs" / "eeg_encoder"
     run_dir: Path | None = None
@@ -198,8 +201,23 @@ def main():
         latent_root=latent_root,
         split_seed=split_seed,
     )
+    image_root = Path(dataset_root) / "images_THINGS" / "object_images"
+    if not image_root.exists():
+        raise FileNotFoundError(f"Image root not found: {image_root}")
+
+    filtered_test_samples, missing_test_images = filter_sample_index_to_existing_files(
+        sample_index=test_dataset._sample_index,
+        train_img_files=test_dataset.train_img_files,
+        image_root=image_root,
+    )
+    if missing_test_images:
+        test_dataset._sample_index = filtered_test_samples
+        print(
+            "Warning: Skipping test samples with missing ground-truth images: "
+            f"{len(missing_test_images)} image ids removed."
+        )
     if len(test_dataset) == 0:
-        raise RuntimeError("Test dataset is empty.")
+        raise RuntimeError("Test dataset is empty after filtering missing ground-truth images.")
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
@@ -232,6 +250,7 @@ def main():
     if c * h * w != int(pca["d"]):
         raise ValueError(f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}.")
 
+    AutoencoderKL = load_autoencoder_kl_class()
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device_t).eval()
     metadata = load_metadata(Path(args.metadata_path))
     scaling_factor = load_scaling_factor(Path(args.metadata_path), vae)
@@ -252,14 +271,24 @@ def main():
         shuffle=False,
         drop_last=False,
     )
+    filtered_train_indices, missing_train_images = filter_image_indices_to_existing_files(
+        image_indices=train_loader.dataset._split_image_indices,
+        train_img_files=train_loader.dataset.train_img_files,
+        image_root=image_root,
+    )
+    if missing_train_images:
+        train_loader.dataset._split_image_indices = np.array(filtered_train_indices, dtype=np.int64)
+        print(
+            "Warning: Skipping train images with missing files when computing baselines: "
+            f"{len(missing_train_images)} image ids removed."
+        )
+    if len(train_loader.dataset) == 0:
+        raise RuntimeError("No training images remain after filtering missing files for baselines.")
+
     global_mean_01, class_means_01, train_count, class_train_counts = compute_global_and_class_means(
         train_loader=train_loader,
         device=device_t,
     )
-
-    image_root = Path(dataset_root) / "images_THINGS" / "object_images"
-    if not image_root.exists():
-        raise FileNotFoundError(f"Image root not found: {image_root}")
 
     ssim_model = StructuralSimilarityIndexMeasure(data_range=1.0).to(device_t)
     ssim_global = StructuralSimilarityIndexMeasure(data_range=1.0).to(device_t)

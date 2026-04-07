@@ -18,6 +18,47 @@ DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
 MODEL_ARCHITECTURE_ID = "eeg_encoder_cnn_2d_eegnet_v1"
 
 
+def _mps_is_available() -> bool:
+    return bool(
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    )
+
+
+def resolve_torch_device(device_name: Optional[str]) -> torch.device:
+    requested = (device_name or "auto").strip().lower()
+
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if _mps_is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    if requested == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        fallback = "mps" if _mps_is_available() else "cpu"
+        print(
+            f"WARNING: Requested device 'cuda' is unavailable; falling back to '{fallback}'."
+        )
+        return torch.device(fallback)
+
+    if requested == "mps":
+        if _mps_is_available():
+            return torch.device("mps")
+        fallback = "cuda" if torch.cuda.is_available() else "cpu"
+        print(
+            f"WARNING: Requested device 'mps' is unavailable; falling back to '{fallback}'."
+        )
+        return torch.device(fallback)
+
+    if requested == "cpu":
+        return torch.device("cpu")
+
+    return torch.device(requested)
+
+
 @dataclass
 class EEGEncoderConfig:
     # Data roots/splits:
@@ -50,7 +91,7 @@ class EEGEncoderConfig:
     epochs: int = 20
 
     # Runtime/output:
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: str = "auto"
     output_dir: str = "outputs/eeg_encoder"
 
     # EEG preprocessing:
@@ -102,7 +143,7 @@ def load_eeg_encoder_config(
         lr=float(data.get("lr", 1e-3)),
         weight_decay=float(data.get("weight_decay", 1e-4)),
         epochs=int(data.get("epochs", 20)),
-        device=str(data.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
+        device=str(data.get("device", "auto")),
         output_dir=str(data.get("output_dir", "outputs/eeg_encoder")),
         eeg_l2_normalize=bool(data.get("eeg_l2_normalize", True)),
         pin_memory=bool(data.get("pin_memory", False)),
@@ -238,7 +279,7 @@ def _save_artifacts(
 
 
 def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
-    device = torch.device(config.device)
+    device = resolve_torch_device(config.device)
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
