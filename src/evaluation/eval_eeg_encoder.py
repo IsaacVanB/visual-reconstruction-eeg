@@ -2,7 +2,6 @@ import argparse
 from pathlib import Path
 import sys
 
-from diffusers import AutoencoderKL
 import numpy as np
 from PIL import Image
 import torch
@@ -15,8 +14,10 @@ from src.data import EEGImageLatentDataset, build_eeg_transform
 from src.evaluation.eeg_eval_core import (
     build_model_for_checkpoint,
     decode_from_pca_prediction,
+    filter_sample_index_to_existing_files,
     find_latest_run_dir,
     load_checkpoint,
+    load_autoencoder_kl_class,
     load_ground_truth_tensor,
     load_metadata,
     load_pca_projection,
@@ -25,6 +26,7 @@ from src.evaluation.eeg_eval_core import (
     resolve_decode_latent_scaling_mode,
     resolve_eval_overrides,
     resolve_pca_params_path,
+    resolve_torch_device,
 )
 
 
@@ -146,8 +148,7 @@ def _build_reconstruction_grid(
 def main():
     args = parse_args()
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    device_t = torch.device(device)
+    device_t = resolve_torch_device(args.device)
 
     runs_base = repo_root / "outputs" / "eeg_encoder"
     run_dir: Path | None = None
@@ -193,6 +194,24 @@ def main():
         latent_root=latent_root,
         split_seed=split_seed,
     )
+    image_root = Path(dataset_root) / "images_THINGS" / "object_images"
+    if not image_root.exists():
+        raise FileNotFoundError(f"Image root not found: {image_root}")
+
+    filtered_samples, missing_test_images = filter_sample_index_to_existing_files(
+        sample_index=dataset._sample_index,
+        train_img_files=dataset.train_img_files,
+        image_root=image_root,
+    )
+    if missing_test_images:
+        dataset._sample_index = filtered_samples
+        print(
+            "Warning: Skipping test samples with missing ground-truth images: "
+            f"{len(missing_test_images)} image ids removed."
+        )
+    if len(dataset) == 0:
+        raise RuntimeError("No test samples remain after filtering missing ground-truth images.")
+
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -232,6 +251,7 @@ def main():
             f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}."
         )
 
+    AutoencoderKL = load_autoencoder_kl_class()
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device_t).eval()
     metadata = load_metadata(Path(args.metadata_path))
     scaling_factor = load_scaling_factor(Path(args.metadata_path), vae)
@@ -249,10 +269,6 @@ def main():
     else:
         output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    image_root = Path(dataset_root) / "images_THINGS" / "object_images"
-    if not image_root.exists():
-        raise FileNotFoundError(f"Image root not found: {image_root}")
-
     print(f"Device: {device_t}")
     print(f"Test samples: {len(dataset)}")
     print(f"PCA shape: k={pca['k']}, D={pca['d']}")
