@@ -11,8 +11,9 @@ from torch.utils.data import DataLoader
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 
-from src.data import EEGImageLatentDataset, build_eeg_transform
+from src.data import EEGImageLatentDataset
 from src.evaluation.eeg_eval_core import (
+    build_eeg_transform_from_saved_cfg,
     build_model_for_checkpoint,
     decode_from_pca_prediction,
     find_latest_run_dir,
@@ -180,10 +181,7 @@ def main():
         class_indices=args.class_indices,
     )
 
-    eeg_tf = build_eeg_transform(
-        normalize_per_sample=bool(saved_cfg.get("eeg_l2_normalize", True)),
-        to_tensor=True,
-    )
+    eeg_tf = build_eeg_transform_from_saved_cfg(saved_cfg)
     dataset = EEGImageLatentDataset(
         dataset_root=dataset_root,
         subject=subject,

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -55,6 +56,8 @@ class EEGEncoderConfig:
 
     # EEG preprocessing:
     # Keep this aligned between train and eval for consistent feature scale.
+    eeg_normalization: str = "zscore"  # one of: l2, zscore, none
+    eeg_zscore_eps: float = 1e-6
     eeg_l2_normalize: bool = True
     pin_memory: bool = False
 
@@ -81,6 +84,12 @@ def load_eeg_encoder_config(
     class_indices = data.get("class_indices", DEFAULT_CLASS_INDICES)
     if class_indices is None:
         class_indices = DEFAULT_CLASS_INDICES
+    eeg_normalization = data.get("eeg_normalization", None)
+    if eeg_normalization is None:
+        if "eeg_l2_normalize" in data:
+            eeg_normalization = "l2" if bool(data.get("eeg_l2_normalize", True)) else "none"
+        else:
+            eeg_normalization = "zscore"
 
     return EEGEncoderConfig(
         dataset_root=str(data.get("dataset_root", "datasets")),
@@ -88,6 +97,8 @@ def load_eeg_encoder_config(
         subject=str(data.get("subject", "sub-1")),
         split_seed=int(data.get("split_seed", 0)),
         class_indices=tuple(int(x) for x in class_indices),
+        eeg_normalization=str(eeg_normalization).lower(),
+        eeg_zscore_eps=float(data.get("eeg_zscore_eps", 1e-6)),
         model_architecture=str(data.get("model_architecture", MODEL_ARCHITECTURE_ID)),
         output_dim=int(data.get("output_dim", 512)),
         temporal_filters=int(data.get("temporal_filters", 32)),
@@ -115,11 +126,39 @@ def load_eeg_encoder_config(
 
 
 def _make_loader(config: EEGEncoderConfig, split: str, shuffle: bool, drop_last: bool) -> DataLoader:
-    # Safe to change transform composition here, but keep train/eval aligned.
-    eeg_transform = build_eeg_transform(
-        normalize_per_sample=config.eeg_l2_normalize,
-        to_tensor=True,
+    return _make_loader_with_stats(
+        config=config,
+        split=split,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        eeg_zscore_stats=None,
     )
+
+
+def _make_loader_with_stats(
+    config: EEGEncoderConfig,
+    split: str,
+    shuffle: bool,
+    drop_last: bool,
+    eeg_zscore_stats: Optional[dict[str, Any]],
+) -> DataLoader:
+    # Safe to change transform composition here, but keep train/eval aligned.
+    normalize_mode = str(config.eeg_normalization).lower()
+    if normalize_mode == "zscore":
+        if eeg_zscore_stats is None:
+            raise ValueError("zscore normalization selected but stats were not provided.")
+        eeg_transform = build_eeg_transform(
+            normalize_mode="zscore",
+            zscore_mean=eeg_zscore_stats["mean"],
+            zscore_std=eeg_zscore_stats["std"],
+            zscore_eps=float(eeg_zscore_stats.get("eps", config.eeg_zscore_eps)),
+            to_tensor=True,
+        )
+    else:
+        eeg_transform = build_eeg_transform(
+            normalize_mode=normalize_mode,
+            to_tensor=True,
+        )
     dataset = EEGImageLatentDataset(
         dataset_root=config.dataset_root,
         latent_root=config.latent_root,
@@ -138,6 +177,31 @@ def _make_loader(config: EEGEncoderConfig, split: str, shuffle: bool, drop_last:
         drop_last=drop_last,
         persistent_workers=config.num_workers > 0,
     )
+
+
+def _compute_train_eeg_channel_stats(config: EEGEncoderConfig) -> dict[str, Any]:
+    dataset = EEGImageLatentDataset(
+        dataset_root=config.dataset_root,
+        latent_root=config.latent_root,
+        subject=config.subject,
+        split="train",
+        class_indices=config.class_indices,
+        transform=None,
+        split_seed=config.split_seed,
+    )
+    train_image_indices = np.asarray(dataset._split_image_indices, dtype=np.int64)
+    eeg_train = np.asarray(dataset.eeg[train_image_indices], dtype=np.float32)  # [Nimg, R, C, T]
+    if eeg_train.ndim != 4:
+        raise ValueError(f"Expected train EEG block [N, R, C, T], got {tuple(eeg_train.shape)}")
+    eeg_train = eeg_train.reshape(-1, eeg_train.shape[2], eeg_train.shape[3])  # [Nimg*R, C, T]
+    mean = eeg_train.mean(axis=(0, 2), dtype=np.float64).astype(np.float32)  # [C]
+    std = eeg_train.std(axis=(0, 2), dtype=np.float64).astype(np.float32)  # [C]
+    std = np.clip(std, float(config.eeg_zscore_eps), None)
+    return {
+        "mean": mean.tolist(),
+        "std": std.tolist(),
+        "eps": float(config.eeg_zscore_eps),
+    }
 
 
 def _run_epoch(
@@ -185,17 +249,23 @@ def _save_artifacts(
     config: EEGEncoderConfig,
     history: dict[str, list[float]],
     model: EEGEncoderCNN,
+    eeg_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> dict[str, Path]:
     saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
     ckpt_path = output_dir / f"eeg_encoder_{saved_at}.pt"
     config_payload = dict(config.__dict__)
     config_payload["model_architecture"] = MODEL_ARCHITECTURE_ID
+    if eeg_zscore_stats is not None:
+        config_payload["eeg_zscore_mean"] = eeg_zscore_stats["mean"]
+        config_payload["eeg_zscore_std"] = eeg_zscore_stats["std"]
+        config_payload["eeg_zscore_eps"] = float(eeg_zscore_stats.get("eps", config.eeg_zscore_eps))
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "config": config_payload,
             "class_indices": list(config.class_indices),
             "model_architecture": MODEL_ARCHITECTURE_ID,
+            "eeg_zscore_stats": eeg_zscore_stats,
             "saved_at": saved_at,
         },
         ckpt_path,
@@ -242,8 +312,25 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader = _make_loader(config=config, split="train", shuffle=True, drop_last=True)
-    valid_loader = _make_loader(config=config, split="valid", shuffle=False, drop_last=False)
+    eeg_zscore_stats = None
+    if str(config.eeg_normalization).lower() == "zscore":
+        eeg_zscore_stats = _compute_train_eeg_channel_stats(config=config)
+        print("Computed train-set EEG zscore stats.")
+
+    train_loader = _make_loader_with_stats(
+        config=config,
+        split="train",
+        shuffle=True,
+        drop_last=True,
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
+    valid_loader = _make_loader_with_stats(
+        config=config,
+        split="valid",
+        shuffle=False,
+        drop_last=False,
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
 
     sample_eeg, sample_latent, _ = train_loader.dataset[0]
     eeg_channels = int(sample_eeg.shape[0])
@@ -280,6 +367,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     print(f"Valid samples: {len(valid_loader.dataset)}")
     print(f"EEG sample shape: ({eeg_channels}, {eeg_timesteps})")
     print(f"Latent target dim: {target_dim}")
+    print(f"EEG normalization: {config.eeg_normalization}")
 
     history = {"train_loss": [], "valid_loss": []}
     for epoch in range(1, config.epochs + 1):
@@ -308,6 +396,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         config=config,
         history=history,
         model=model,
+        eeg_zscore_stats=eeg_zscore_stats,
     )
     print(f"Saved checkpoint: {artifact_paths['checkpoint']}")
     print(f"Saved curves: {artifact_paths['curves']}")

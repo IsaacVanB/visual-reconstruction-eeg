@@ -28,6 +28,10 @@ device: cuda
 output_dir: outputs/eeg_encoder
 eval_max_samples: 16
 
+# EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
+eeg_normalization: zscore
+eeg_zscore_eps: 1.0e-6
+
 # Subset experiment control
 class_indices:
   - 0

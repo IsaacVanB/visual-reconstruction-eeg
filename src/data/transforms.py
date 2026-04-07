@@ -29,6 +29,32 @@ class EEGPerSampleNormalize:
         return eeg_np / norm
 
 
+class EEGChannelZScoreNormalize:
+    """Channel-wise z-score normalize EEG sample [C, T] using train-set stats."""
+
+    def __init__(self, mean, std, eps: float = 1e-6) -> None:
+        mean_np = np.asarray(mean, dtype=np.float32).reshape(-1, 1)
+        std_np = np.asarray(std, dtype=np.float32).reshape(-1, 1)
+        if mean_np.shape != std_np.shape:
+            raise ValueError(
+                f"zscore mean/std shape mismatch: {mean_np.shape} vs {std_np.shape}"
+            )
+        self.mean = mean_np
+        self.std = np.clip(std_np, eps, None)
+        self.eps = float(eps)
+
+    def __call__(self, eeg):
+        eeg_np = np.asarray(eeg, dtype=np.float32)
+        if eeg_np.ndim != 2:
+            raise ValueError(f"Expected EEG sample [C, T], got shape {tuple(eeg_np.shape)}")
+        if eeg_np.shape[0] != self.mean.shape[0]:
+            raise ValueError(
+                f"EEG channels ({eeg_np.shape[0]}) do not match zscore stats "
+                f"({self.mean.shape[0]})."
+            )
+        return (eeg_np - self.mean) / self.std
+
+
 class EEGToTensor:
     def __call__(self, eeg):
         if isinstance(eeg, torch.Tensor):
@@ -80,10 +106,33 @@ def build_image_transform(
 def build_eeg_transform(
     normalize_per_sample: bool = True,
     to_tensor: bool = True,
+    normalize_mode: str | None = None,
+    zscore_mean=None,
+    zscore_std=None,
+    zscore_eps: float = 1e-6,
 ) -> Compose:
     transforms = []
-    if normalize_per_sample:
+    if normalize_mode is None:
+        normalize_mode = "l2" if normalize_per_sample else "none"
+    normalize_mode = str(normalize_mode).lower()
+
+    if normalize_mode == "l2":
         transforms.append(EEGPerSampleNormalize())
+    elif normalize_mode == "zscore":
+        if zscore_mean is None or zscore_std is None:
+            raise ValueError("zscore normalization requires zscore_mean and zscore_std.")
+        transforms.append(
+            EEGChannelZScoreNormalize(
+                mean=zscore_mean,
+                std=zscore_std,
+                eps=zscore_eps,
+            )
+        )
+    elif normalize_mode == "none":
+        pass
+    else:
+        raise ValueError(f"Unknown EEG normalization mode: {normalize_mode}")
+
     if to_tensor:
         transforms.append(EEGToTensor())
     return Compose(transforms)

@@ -10,6 +10,7 @@ from PIL import Image
 import torch
 from torch import nn
 
+from src.data import build_eeg_transform
 from src.models import EEGEncoderCNN
 
 
@@ -100,6 +101,34 @@ def resolve_eval_overrides(
         str(resolved_subject),
         int(resolved_split_seed),
         resolved_class_indices,
+    )
+
+
+def build_eeg_transform_from_saved_cfg(saved_cfg: dict):
+    normalize_mode = str(saved_cfg.get("eeg_normalization", "")).lower()
+    if not normalize_mode:
+        normalize_mode = "l2" if bool(saved_cfg.get("eeg_l2_normalize", True)) else "none"
+
+    if normalize_mode == "zscore":
+        mean = saved_cfg.get("eeg_zscore_mean")
+        std = saved_cfg.get("eeg_zscore_std")
+        if mean is None or std is None:
+            raise KeyError(
+                "Checkpoint config uses eeg_normalization='zscore' but is missing "
+                "'eeg_zscore_mean'/'eeg_zscore_std'."
+            )
+        eps = float(saved_cfg.get("eeg_zscore_eps", 1e-6))
+        return build_eeg_transform(
+            normalize_mode="zscore",
+            zscore_mean=mean,
+            zscore_std=std,
+            zscore_eps=eps,
+            to_tensor=True,
+        )
+
+    return build_eeg_transform(
+        normalize_mode=normalize_mode,
+        to_tensor=True,
     )
 
 
