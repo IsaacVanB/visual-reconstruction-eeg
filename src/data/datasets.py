@@ -105,7 +105,7 @@ class EEGImageDataset(Dataset):
         self.num_classes = self.num_images // self.images_per_class
         self.class_indices = _resolve_class_indices(self.class_indices, self.num_classes)
 
-        self._split_counts = {"train": 8, "valid": 1, "test": 1}
+        self._split_counts = {"train": 7, "valid": 2, "test": 1} # if changing, also change in ImageDataset (~line 289)
         if self.split not in self._split_counts:
             raise ValueError("split must be one of: 'train', 'valid', 'test'.")
 
@@ -286,7 +286,7 @@ class ImageDataset(Dataset):
         self.num_classes = self.num_images // self.images_per_class
         self.class_indices = _resolve_class_indices(self.class_indices, self.num_classes)
 
-        self._split_counts = {"train": 8, "valid": 1, "test": 1}
+        self._split_counts = {"train": 7, "valid": 2, "test": 1} # if changing, also change in EEGImageDataset (~line 108)
         if self.split not in self._split_counts:
             raise ValueError("split must be one of: 'train', 'valid', 'test'.")
 

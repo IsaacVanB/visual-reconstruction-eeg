@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "--embedding-type",
         choices=["full", "pca", "both"],
-        default="full",
+        default="both",
         help="What to produce: full latents, PCA latents, or both.",
     )
     parser.add_argument(
@@ -208,7 +208,7 @@ def _extract_full_latents(
                 out_file = latents_full_dir / f"{int(image_id):06d}.pt"
                 torch.save(z, out_file)
                 step += 1
-                if step % 500 == 0 or step == total:
+                if step % 100 == 0 or step == total:
                     print(f"[{step}/{total}] saved: {out_file.name}")
 
     metadata = {
