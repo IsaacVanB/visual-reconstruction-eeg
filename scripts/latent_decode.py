@@ -188,8 +188,12 @@ def main():
         latent_def = str(metadata.get("latent_definition", "")).lower()
         if "posterior.mean" in latent_def:
             decode_scaling_mode = "none"
-        else:
+        elif "scaling_factor" in latent_def or "* 0.18215" in latent_def:
             decode_scaling_mode = "divide"
+        else:
+            # Current extraction pipeline stores raw posterior.mean latents.
+            # Prefer no scaling when metadata is missing/ambiguous.
+            decode_scaling_mode = "none"
 
     with torch.no_grad():
         if decode_scaling_mode == "divide":

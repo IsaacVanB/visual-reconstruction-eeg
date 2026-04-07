@@ -372,7 +372,6 @@ def main():
         "latent_root": latent_root,
         "subject": subject,
         "split_seed": split_seed,
-        "class_indices": class_indices,
         "image_size": [args.image_size, args.image_size],
         "lpips_net": args.lpips_net,
         "train_count_for_means": int(train_count),
@@ -384,6 +383,7 @@ def main():
         "SSIM_class_mean": float(ssim_class.compute().item()),
         "LPIPS_class_mean": float(lpips_sum_class / float(test_count)),
         "class_train_counts": {str(k): int(v) for k, v in sorted(class_train_counts.items())},
+        "class_indices": class_indices,
     }
 
     metrics_path = output_dir / args.metrics_name

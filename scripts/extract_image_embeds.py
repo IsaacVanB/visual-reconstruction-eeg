@@ -4,8 +4,6 @@ import sys
 from pathlib import Path
 import warnings
 
-import numpy as np
-from PIL import Image
 import torch
 
 # Some dependency stacks call `torch.xpu.is_available()` unconditionally.
@@ -23,7 +21,7 @@ from diffusers import AutoencoderKL
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
-from src.data import build_image_transform
+from src.data import ImageDataset, build_image_transform
 
 # Silence known huggingface_hub deprecation emitted by some model download paths.
 warnings.filterwarnings(
@@ -34,20 +32,6 @@ warnings.filterwarnings(
 )
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
-
-
-def resolve_class_indices(class_indices, num_classes: int) -> np.ndarray:
-    if class_indices is None:
-        return np.arange(num_classes, dtype=np.int64)
-
-    resolved = np.asarray(class_indices, dtype=np.int64)
-    if resolved.ndim != 1 or resolved.size == 0:
-        raise ValueError("class_indices must be a non-empty 1D list of class ids.")
-    if np.any(resolved < 0) or np.any(resolved >= num_classes):
-        raise ValueError(f"class_indices must be in [0, {num_classes - 1}].")
-    if np.unique(resolved).size != resolved.size:
-        raise ValueError("class_indices contains duplicates.")
-    return resolved
 
 
 def parse_args():
@@ -135,15 +119,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_image_path(image_root: Path, image_name: str) -> Path:
-    if "/" in image_name or "\\" in image_name:
-        rel_path = Path(image_name)
-    else:
-        class_name = image_name.rsplit("_", 1)[0]
-        rel_path = Path(class_name) / image_name
-    return image_root / rel_path
-
-
 def _load_pt_tensor(path: Path) -> torch.Tensor:
     try:
         tensor = torch.load(path, map_location="cpu", weights_only=True)
@@ -154,64 +129,42 @@ def _load_pt_tensor(path: Path) -> torch.Tensor:
     return tensor
 
 
-def _collect_dataset_info(dataset_root: Path, class_indices_raw):
-    image_metadata_path = dataset_root / "THINGS_EEG_2" / "image_metadata.npy"
-    if not image_metadata_path.exists():
-        raise FileNotFoundError(f"Image metadata not found: {image_metadata_path}")
-    image_metadata = np.load(image_metadata_path, allow_pickle=True).item()
-    if "train_img_files" not in image_metadata:
-        raise KeyError("Expected key 'train_img_files' in image metadata.")
-
-    train_img_files = image_metadata["train_img_files"]
-    num_images = len(train_img_files)
-    images_per_class = 10
-    if num_images % images_per_class != 0:
-        raise ValueError(
-            "Number of images must be divisible by images_per_class; "
-            f"got {num_images} and {images_per_class}."
-        )
-    num_classes = num_images // images_per_class
-    class_indices = resolve_class_indices(class_indices_raw, num_classes)
-    return train_img_files, images_per_class, class_indices
-
-
-def _build_split_image_ids(
-    class_indices: np.ndarray,
-    images_per_class: int,
+def _build_split_info(
+    dataset_root: Path,
+    class_indices,
     split_seed: int,
-) -> dict[str, list[int]]:
-    split_offsets = {
-        "train": (0, 8),
-        "valid": (8, 9),
-        "test": (9, 10),
-    }
-    rng = np.random.default_rng(split_seed)
-    split_ids = {"train": [], "valid": [], "test": []}
-    for class_idx in class_indices:
-        class_start = int(class_idx) * images_per_class
-        class_images = np.arange(class_start, class_start + images_per_class)
-        shuffled = rng.permutation(class_images).tolist()
-        for split_name, (start, end) in split_offsets.items():
-            split_ids[split_name].extend(int(x) for x in shuffled[start:end])
-    return split_ids
+) -> tuple[list[int], list[int], list[int], int]:
+    train_dataset = ImageDataset(
+        dataset_root=str(dataset_root),
+        split="train",
+        class_indices=class_indices,
+        image_transform=None,
+        split_seed=split_seed,
+    )
+    valid_dataset = ImageDataset(
+        dataset_root=str(dataset_root),
+        split="valid",
+        class_indices=class_indices,
+        image_transform=None,
+        split_seed=split_seed,
+    )
+    train_ids = [int(x) for x in train_dataset._split_image_indices.tolist()]
+    valid_ids = [int(x) for x in valid_dataset._split_image_indices.tolist()]
+    resolved_class_indices = [int(x) for x in train_dataset.class_indices.tolist()]
+    images_per_class = int(train_dataset.images_per_class)
+    return train_ids, valid_ids, resolved_class_indices, images_per_class
 
 
 def _extract_full_latents(
     args,
     dataset_root: Path,
     output_root: Path,
-    train_img_files,
     images_per_class: int,
-    class_indices: np.ndarray,
-    selected_image_ids,
+    class_indices: list[int],
     split_image_ids: dict[str, list[int]],
 ) -> Path:
     latents_full_dir = output_root / args.full_dir_name
     latents_full_dir.mkdir(parents=True, exist_ok=True)
-
-    image_root = dataset_root / "images_THINGS" / "object_images"
-    if not image_root.exists():
-        raise FileNotFoundError(f"Image root not found: {image_root}")
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device).eval()
@@ -221,31 +174,42 @@ def _extract_full_latents(
         std=(0.5, 0.5, 0.5),
     )
 
-    total = len(selected_image_ids)
+    train_dataset = ImageDataset(
+        dataset_root=str(dataset_root),
+        split="train",
+        class_indices=class_indices,
+        image_transform=preprocess,
+        return_image_id=True,
+        split_seed=args.split_seed,
+    )
+    valid_dataset = ImageDataset(
+        dataset_root=str(dataset_root),
+        split="valid",
+        class_indices=class_indices,
+        image_transform=preprocess,
+        return_image_id=True,
+        split_seed=args.split_seed,
+    )
+
+    total = int(len(train_dataset) + len(valid_dataset))
     print(
         "Extracting full latents for "
         f"{total} unique stimulus images across {len(class_indices)} classes..."
     )
 
+    step = 0
     with torch.no_grad():
-        for step, image_id in enumerate(selected_image_ids):
-            image_name = train_img_files[image_id]
-            image_path = resolve_image_path(image_root=image_root, image_name=image_name)
-            if not image_path.exists():
-                raise FileNotFoundError(f"Image file not found: {image_path}")
-
-            with Image.open(image_path) as pil_image:
-                img = pil_image.convert("RGB")
-            x = preprocess(img).unsqueeze(0).to(device)  # [1, 3, 512, 512] in [-1, 1]
-
-            posterior = vae.encode(x).latent_dist
-            z = posterior.mean[0].to(dtype=torch.float16).cpu()  # [4, 64, 64], deterministic
-
-            out_file = latents_full_dir / f"{image_id:06d}.pt"
-            torch.save(z, out_file)
-
-            if (step + 1) % 500 == 0 or (step + 1) == total:
-                print(f"[{step + 1}/{total}] saved: {out_file.name}")
+        for dataset in (train_dataset, valid_dataset):
+            for idx in range(len(dataset)):
+                image_tensor, _label, image_id = dataset[idx]
+                x = image_tensor.unsqueeze(0).to(device=device, dtype=torch.float32)  # [1,3,H,W] in [-1,1]
+                posterior = vae.encode(x).latent_dist
+                z = posterior.mean[0].to(dtype=torch.float16).cpu()
+                out_file = latents_full_dir / f"{int(image_id):06d}.pt"
+                torch.save(z, out_file)
+                step += 1
+                if step % 500 == 0 or step == total:
+                    print(f"[{step}/{total}] saved: {out_file.name}")
 
     metadata = {
         "model_id": args.vae_name,
@@ -262,7 +226,7 @@ def _extract_full_latents(
         "latent_tensor_shape": [4, args.image_size // 8, args.image_size // 8],
         "filename_convention": f"latents/{args.full_dir_name}" + "/{image_id:06d}.pt",
         "images_per_class": images_per_class,
-        "class_indices": class_indices.tolist(),
+        "class_indices": class_indices,
         "num_images": int(total),
         "split_seed": int(args.split_seed),
         "split_num_images": {
@@ -424,16 +388,16 @@ def main():
         output_root = repo_root / output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
-    train_img_files, images_per_class, class_indices = _collect_dataset_info(
+    train_ids, valid_ids, class_indices, images_per_class = _build_split_info(
         dataset_root=dataset_root,
-        class_indices_raw=args.class_indices,
-    )
-    split_image_ids = _build_split_image_ids(
-        class_indices=class_indices,
-        images_per_class=images_per_class,
+        class_indices=args.class_indices,
         split_seed=args.split_seed,
     )
-    selected_image_ids = sorted(set(split_image_ids["train"] + split_image_ids["valid"]))
+    split_image_ids = {
+        "train": train_ids,
+        "valid": valid_ids,
+        "test": [],
+    }
 
     full_latent_dir = output_root / args.full_dir_name
     if args.embedding_type in ("full", "both"):
@@ -441,10 +405,8 @@ def main():
             args=args,
             dataset_root=dataset_root,
             output_root=output_root,
-            train_img_files=train_img_files,
             images_per_class=images_per_class,
             class_indices=class_indices,
-            selected_image_ids=selected_image_ids,
             split_image_ids=split_image_ids,
         )
     elif not full_latent_dir.exists():
@@ -458,8 +420,8 @@ def main():
             args=args,
             full_latent_dir=full_latent_dir,
             output_root=output_root,
-            train_image_ids=split_image_ids["train"],
-            valid_image_ids=split_image_ids["valid"],
+            train_image_ids=train_ids,
+            valid_image_ids=valid_ids,
         )
 
 

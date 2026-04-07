@@ -292,7 +292,11 @@ def resolve_decode_latent_scaling_mode(mode_arg: str, metadata: dict) -> str:
     latent_def = str(metadata.get("latent_definition", "")).lower()
     if "posterior.mean" in latent_def:
         return "none"
-    return "divide"
+    if "scaling_factor" in latent_def or "* 0.18215" in latent_def:
+        return "divide"
+    # Current extraction pipeline stores raw posterior.mean latents.
+    # Prefer no scaling when metadata is missing/ambiguous.
+    return "none"
 
 
 def decode_from_pca_prediction(
