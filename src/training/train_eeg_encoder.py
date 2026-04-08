@@ -17,6 +17,7 @@ from src.models import EEGEncoderCNN
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
 MODEL_ARCHITECTURE_ID = "eeg_encoder_cnn_2d_eegnet_v1"
+SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
 
 
 @dataclass
@@ -28,7 +29,8 @@ class EEGEncoderConfig:
     latent_root: str = "latents/img_pca"
     subject: str = "sub-1"
     split_seed: int = 0
-    class_indices: Sequence[int] = tuple(DEFAULT_CLASS_INDICES)
+    class_subset: str = "default100"  # one of: default100, all
+    class_indices: Optional[Sequence[int]] = tuple(DEFAULT_CLASS_INDICES)
 
     # Model architecture knobs:
     # - output_dim MUST match PCA latent dimension (k) used as target.
@@ -81,9 +83,25 @@ def load_eeg_encoder_config(
             if value is not None:
                 data[key] = value
 
-    class_indices = data.get("class_indices", DEFAULT_CLASS_INDICES)
-    if class_indices is None:
-        class_indices = DEFAULT_CLASS_INDICES
+    class_indices_override = overrides.get("class_indices") if overrides else None
+    class_subset_override = overrides.get("class_subset") if overrides else None
+    class_subset = str(data.get("class_subset", "default100")).lower()
+    if class_subset_override is not None:
+        class_subset = str(class_subset_override).lower()
+    if class_subset not in SUPPORTED_CLASS_SUBSETS:
+        raise ValueError(
+            f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
+        )
+    if class_indices_override is not None:
+        class_indices = class_indices_override
+    else:
+        class_indices_raw = data.get("class_indices", None)
+        if class_indices_raw is not None:
+            class_indices = class_indices_raw
+        elif class_subset == "all":
+            class_indices = None
+        else:
+            class_indices = DEFAULT_CLASS_INDICES
     eeg_normalization = data.get("eeg_normalization", None)
     if eeg_normalization is None:
         if "eeg_l2_normalize" in data:
@@ -96,7 +114,8 @@ def load_eeg_encoder_config(
         latent_root=str(data.get("latent_root", "latents/img_pca")),
         subject=str(data.get("subject", "sub-1")),
         split_seed=int(data.get("split_seed", 0)),
-        class_indices=tuple(int(x) for x in class_indices),
+        class_subset=class_subset,
+        class_indices=(tuple(int(x) for x in class_indices) if class_indices is not None else None),
         eeg_normalization=str(eeg_normalization).lower(),
         eeg_zscore_eps=float(data.get("eeg_zscore_eps", 1e-6)),
         model_architecture=str(data.get("model_architecture", MODEL_ARCHITECTURE_ID)),
@@ -263,7 +282,7 @@ def _save_artifacts(
         {
             "model_state_dict": model.state_dict(),
             "config": config_payload,
-            "class_indices": list(config.class_indices),
+            "class_indices": list(config.class_indices) if config.class_indices is not None else None,
             "model_architecture": MODEL_ARCHITECTURE_ID,
             "eeg_zscore_stats": eeg_zscore_stats,
             "saved_at": saved_at,
@@ -278,6 +297,7 @@ def _save_artifacts(
     summary = {
         "saved_at": saved_at,
         "final_train_loss": history["train_loss"][-1],
+        "final_train_eval_loss": history["train_eval_loss"][-1],
         "final_valid_loss": history["valid_loss"][-1],
         "best_valid_loss": min(history["valid_loss"]),
         "epochs": config.epochs,
@@ -289,6 +309,7 @@ def _save_artifacts(
     epochs = list(range(1, len(history["train_loss"]) + 1))
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
     ax.plot(epochs, history["train_loss"], label="train")
+    ax.plot(epochs, history["train_eval_loss"], label="train_eval")
     ax.plot(epochs, history["valid_loss"], label="valid")
     ax.set_title("EEG Encoder MSE")
     ax.set_xlabel("Epoch")
@@ -322,6 +343,13 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         split="train",
         shuffle=True,
         drop_last=True,
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
+    train_eval_loader = _make_loader_with_stats(
+        config=config,
+        split="train",
+        shuffle=False,
+        drop_last=False,
         eeg_zscore_stats=eeg_zscore_stats,
     )
     valid_loader = _make_loader_with_stats(
@@ -363,19 +391,31 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     )
 
     print(f"Device: {device}")
+    print(f"Class subset: {config.class_subset}")
+    if config.class_indices is None:
+        print("Class indices: all classes")
+    else:
+        print(f"Class indices: {len(config.class_indices)} classes")
     print(f"Train samples: {len(train_loader.dataset)}")
+    print(f"Train-eval samples: {len(train_eval_loader.dataset)}")
     print(f"Valid samples: {len(valid_loader.dataset)}")
     print(f"EEG sample shape: ({eeg_channels}, {eeg_timesteps})")
     print(f"Latent target dim: {target_dim}")
     print(f"EEG normalization: {config.eeg_normalization}")
 
-    history = {"train_loss": [], "valid_loss": []}
+    history = {"train_loss": [], "train_eval_loss": [], "valid_loss": []}
     for epoch in range(1, config.epochs + 1):
         train_metrics = _run_epoch(
             model=model,
             loader=train_loader,
             device=device,
             optimizer=optimizer,
+        )
+        train_eval_metrics = _run_epoch(
+            model=model,
+            loader=train_eval_loader,
+            device=device,
+            optimizer=None,
         )
         valid_metrics = _run_epoch(
             model=model,
@@ -384,10 +424,12 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             optimizer=None,
         )
         history["train_loss"].append(train_metrics["loss"])
+        history["train_eval_loss"].append(train_eval_metrics["loss"])
         history["valid_loss"].append(valid_metrics["loss"])
         print(
             f"Epoch {epoch}/{config.epochs} | "
             f"train_mse={train_metrics['loss']:.6f} "
+            f"train_eval_mse={train_eval_metrics['loss']:.6f} "
             f"valid_mse={valid_metrics['loss']:.6f}"
         )
 

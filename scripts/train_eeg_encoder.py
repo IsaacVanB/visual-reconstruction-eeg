@@ -14,6 +14,7 @@ def parse_args():
     parser.add_argument("--dataset-root")
     parser.add_argument("--latent-root")
     parser.add_argument("--subject")
+    parser.add_argument("--class-subset", choices=["default100", "all"])
     parser.add_argument("--class-indices", type=int, nargs="+")
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--output-dim", type=int)
@@ -43,6 +44,7 @@ def main():
         "dataset_root": args.dataset_root,
         "latent_root": args.latent_root,
         "subject": args.subject,
+        "class_subset": args.class_subset,
         "class_indices": args.class_indices,
         "split_seed": args.split_seed,
         "output_dim": args.output_dim,
