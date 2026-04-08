@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import warnings
-
-from diffusers import AutoencoderKL
 import numpy as np
 from PIL import Image
 import torch
@@ -20,6 +18,103 @@ warnings.filterwarnings(
     category=UserWarning,
     module="huggingface_hub.utils._validators",
 )
+
+
+def _mps_is_available() -> bool:
+    return bool(
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    )
+
+
+def resolve_torch_device(device_name: str | None) -> torch.device:
+    requested = (device_name or "auto").strip().lower()
+
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if _mps_is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    if requested == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        fallback = "mps" if _mps_is_available() else "cpu"
+        print(
+            f"WARNING: Requested device 'cuda' is unavailable; falling back to '{fallback}'."
+        )
+        return torch.device(fallback)
+
+    if requested == "mps":
+        if _mps_is_available():
+            return torch.device("mps")
+        fallback = "cuda" if torch.cuda.is_available() else "cpu"
+        print(
+            f"WARNING: Requested device 'mps' is unavailable; falling back to '{fallback}'."
+        )
+        return torch.device(fallback)
+
+    if requested == "cpu":
+        return torch.device("cpu")
+
+    return torch.device(requested)
+
+
+class _TorchXPUShim:
+    """
+    Shim fix for when torch.xpu isn't on your system
+    """
+
+    @staticmethod
+    def is_available() -> bool:
+        return False
+
+    @staticmethod
+    def empty_cache() -> None:
+        return None
+
+    @staticmethod
+    def device_count() -> int:
+        return 0
+
+    @staticmethod
+    def manual_seed(seed: int):
+        return torch.manual_seed(seed)
+
+    @staticmethod
+    def reset_peak_memory_stats(*_args, **_kwargs) -> None:
+        return None
+
+    @staticmethod
+    def max_memory_allocated(*_args, **_kwargs) -> int:
+        return 0
+
+    @staticmethod
+    def synchronize(*_args, **_kwargs) -> None:
+        return None
+
+    def __getattr__(self, _name: str):
+        return lambda *_args, **_kwargs: None
+
+
+def load_autoencoder_kl_class():
+    if not hasattr(torch, "xpu"):
+        torch.xpu = _TorchXPUShim()
+
+    try:
+        from diffusers import AutoencoderKL
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to import diffusers.AutoencoderKL. "
+            "This project's evaluation code is compatible with older diffusers releases, "
+            "but your environment currently has a newer diffusers build that expects Torch APIs "
+            "not present in torch 2.2.x. Reinstall a compatible version, for example:\n"
+            "  .venv/bin/pip install 'diffusers[torch]>=0.30,<0.35'\n"
+            "Then rerun evaluation from the saved checkpoint."
+        ) from exc
+
+    return AutoencoderKL
 
 
 class EEGEncoderCNN1D(nn.Module):
@@ -308,7 +403,7 @@ def load_metadata(metadata_path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def load_scaling_factor(metadata_path: Path, vae: AutoencoderKL) -> float:
+def load_scaling_factor(metadata_path: Path, vae) -> float:
     metadata = load_metadata(metadata_path)
     if "scaling_factor" in metadata:
         return float(metadata["scaling_factor"])
@@ -332,7 +427,7 @@ def decode_from_pca_prediction(
     pred_pca: torch.Tensor,
     pca: dict,
     latent_shape: tuple[int, int, int],
-    vae: AutoencoderKL,
+    vae,
     scaling_factor: float,
     decode_scaling_mode: str,
 ) -> torch.Tensor:
@@ -354,6 +449,44 @@ def resolve_image_path(image_root: Path, image_name: str) -> Path:
         class_name = image_name.rsplit("_", 1)[0]
         rel_path = Path(class_name) / image_name
     return image_root / rel_path
+
+
+def filter_image_indices_to_existing_files(
+    image_indices,
+    train_img_files,
+    image_root: Path,
+) -> tuple[list[int], dict[int, str]]:
+    filtered_indices: list[int] = []
+    missing_by_index: dict[int, str] = {}
+
+    for image_index in image_indices:
+        idx = int(image_index)
+        image_name = str(train_img_files[idx])
+        if resolve_image_path(image_root=image_root, image_name=image_name).exists():
+            filtered_indices.append(idx)
+        elif idx not in missing_by_index:
+            missing_by_index[idx] = image_name
+
+    return filtered_indices, missing_by_index
+
+
+def filter_sample_index_to_existing_files(
+    sample_index,
+    train_img_files,
+    image_root: Path,
+) -> tuple[list[tuple[int, int]], dict[int, str]]:
+    filtered_samples: list[tuple[int, int]] = []
+    missing_by_index: dict[int, str] = {}
+
+    for image_index, rep_index in sample_index:
+        idx = int(image_index)
+        image_name = str(train_img_files[idx])
+        if resolve_image_path(image_root=image_root, image_name=image_name).exists():
+            filtered_samples.append((idx, int(rep_index)))
+        elif idx not in missing_by_index:
+            missing_by_index[idx] = image_name
+
+    return filtered_samples, missing_by_index
 
 
 def load_ground_truth_tensor(
