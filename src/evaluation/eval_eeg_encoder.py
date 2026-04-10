@@ -5,7 +5,6 @@ import sys
 import numpy as np
 from PIL import Image
 import torch
-from torch.utils.data import DataLoader
 
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
@@ -146,6 +145,23 @@ def _build_reconstruction_grid(
     return Image.fromarray(canvas)
 
 
+def _iter_eeg_label_batches(dataset: EEGImageLatentDataset, batch_size: int):
+    total = len(dataset._sample_index)
+    for start in range(0, total, batch_size):
+        batch_samples = dataset._sample_index[start : start + batch_size]
+        eeg_batch = []
+        labels = []
+        for image_index, rep_index in batch_samples:
+            eeg_sample = dataset.eeg[image_index, rep_index]
+            if dataset.transform:
+                eeg_sample = dataset.transform(eeg_sample)
+            if not torch.is_tensor(eeg_sample):
+                eeg_sample = torch.as_tensor(eeg_sample)
+            eeg_batch.append(eeg_sample)
+            labels.append(int(image_index) // int(dataset.images_per_class))
+        yield torch.stack(eeg_batch, dim=0), torch.tensor(labels, dtype=torch.long), batch_samples
+
+
 def main():
     args = parse_args()
 
@@ -210,16 +226,15 @@ def main():
     if len(dataset) == 0:
         raise RuntimeError("No test samples remain after filtering missing ground-truth images.")
 
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        drop_last=False,
-        persistent_workers=args.num_workers > 0,
-    )
-
-    sample_eeg, sample_latent, _ = dataset[0]
+    if len(dataset._sample_index) == 0:
+        raise RuntimeError("No test samples remain after filtering.")
+    first_image_index, first_rep_index = dataset._sample_index[0]
+    sample_eeg = dataset.eeg[first_image_index, first_rep_index]
+    if dataset.transform:
+        sample_eeg = dataset.transform(sample_eeg)
+    if not torch.is_tensor(sample_eeg):
+        sample_eeg = torch.as_tensor(sample_eeg)
+    sample_latent = torch.zeros(int(saved_cfg.get("output_dim", 512)), dtype=torch.float32)
     model = build_model_for_checkpoint(
         model_state_dict=ckpt["model_state_dict"],
         sample_eeg=sample_eeg,
@@ -277,8 +292,9 @@ def main():
     originals_for_grid = []
     recons_for_grid = []
     with torch.no_grad():
-        global_idx = 0
-        for eeg, _target_latent, labels in loader:
+        for eeg, labels, batch_samples in _iter_eeg_label_batches(
+            dataset=dataset, batch_size=args.batch_size
+        ):
             remaining = eeg.size(0)
             if args.max_samples is not None:
                 remaining = min(remaining, args.max_samples - saved)
@@ -287,6 +303,7 @@ def main():
 
             eeg = eeg[:remaining].to(device=device_t, dtype=torch.float32)
             labels = labels[:remaining]
+            batch_samples = batch_samples[:remaining]
 
             pred_pca = model(eeg)
             if pred_pca.shape[1] != int(pca["k"]):
@@ -306,7 +323,7 @@ def main():
             for j in range(recon_01.size(0)):
                 if args.max_samples is not None and saved >= args.max_samples:
                     break
-                image_index, rep_index = dataset._sample_index[global_idx]
+                image_index, rep_index = batch_samples[j]
                 label = int(labels[j].item())
                 out_name = (
                     f"label_{label:04d}_img_{int(image_index):06d}_"
@@ -324,7 +341,6 @@ def main():
                     originals_for_grid.append(gt)
                     recons_for_grid.append(recon_01[j].detach().cpu())
                 saved += 1
-                global_idx += 1
             if args.max_samples is not None and saved >= args.max_samples:
                 break
             if saved % 100 == 0 and saved > 0:

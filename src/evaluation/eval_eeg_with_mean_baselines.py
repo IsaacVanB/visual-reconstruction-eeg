@@ -151,6 +151,23 @@ def compute_global_and_class_means(train_loader, device: torch.device):
     return global_mean, class_means, total_count, class_count
 
 
+def _iter_eeg_label_batches(dataset: EEGImageLatentDataset, batch_size: int):
+    total = len(dataset._sample_index)
+    for start in range(0, total, batch_size):
+        batch_samples = dataset._sample_index[start : start + batch_size]
+        eeg_batch = []
+        labels = []
+        for image_index, rep_index in batch_samples:
+            eeg_sample = dataset.eeg[image_index, rep_index]
+            if dataset.transform:
+                eeg_sample = dataset.transform(eeg_sample)
+            if not torch.is_tensor(eeg_sample):
+                eeg_sample = torch.as_tensor(eeg_sample)
+            eeg_batch.append(eeg_sample)
+            labels.append(int(image_index) // int(dataset.images_per_class))
+        yield torch.stack(eeg_batch, dim=0), torch.tensor(labels, dtype=torch.long), batch_samples
+
+
 def main():
     args = parse_args()
     StructuralSimilarityIndexMeasure, lpips = _load_metrics_deps()
@@ -216,16 +233,15 @@ def main():
         )
     if len(test_dataset) == 0:
         raise RuntimeError("Test dataset is empty after filtering missing ground-truth images.")
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        drop_last=False,
-        persistent_workers=args.num_workers > 0,
-    )
-
-    sample_eeg, sample_latent, _ = test_dataset[0]
+    if len(test_dataset._sample_index) == 0:
+        raise RuntimeError("No test samples remain after filtering.")
+    first_image_index, first_rep_index = test_dataset._sample_index[0]
+    sample_eeg = test_dataset.eeg[first_image_index, first_rep_index]
+    if test_dataset.transform:
+        sample_eeg = test_dataset.transform(sample_eeg)
+    if not torch.is_tensor(sample_eeg):
+        sample_eeg = torch.as_tensor(sample_eeg)
+    sample_latent = torch.zeros(int(saved_cfg.get("output_dim", 512)), dtype=torch.float32)
     model = build_model_for_checkpoint(
         model_state_dict=ckpt["model_state_dict"],
         sample_eeg=sample_eeg,
@@ -316,9 +332,10 @@ def main():
     print(f"PCA standardized: {pca['standardized']}")
     print(f"Decode latent scaling mode: {decode_scaling_mode}")
 
-    global_idx = 0
     with torch.no_grad():
-        for eeg, _target_latent, labels in test_loader:
+        for eeg, labels, batch_samples in _iter_eeg_label_batches(
+            dataset=test_dataset, batch_size=args.batch_size
+        ):
             batch_n = eeg.size(0)
             if args.max_samples is not None:
                 remaining = args.max_samples - test_count
@@ -330,6 +347,7 @@ def main():
 
             eeg = eeg[:batch_n].to(device=device_t, dtype=torch.float32)
             labels = labels[:batch_n].to(device=device_t, dtype=torch.long)
+            batch_samples = batch_samples[:batch_n]
 
             pred_pca = model(eeg)
             if pred_pca.shape[1] != int(pca["k"]):
@@ -352,7 +370,7 @@ def main():
 
             targets = []
             for j in range(batch_n):
-                image_index, _rep_index = test_dataset._sample_index[global_idx + j]
+                image_index, _rep_index = batch_samples[j]
                 image_name = test_dataset.train_img_files[int(image_index)]
                 gt_01 = load_ground_truth_tensor(
                     image_root=image_root,
@@ -388,7 +406,6 @@ def main():
             )
 
             test_count += batch_n
-            global_idx += batch_n
 
     if test_count == 0:
         raise RuntimeError("No test samples evaluated.")
