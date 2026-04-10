@@ -61,6 +61,26 @@ def resolve_torch_device(device_name: Optional[str]) -> torch.device:
     return torch.device(requested)
 
 
+def _resolve_latent_root_for_output_dim(latent_root: str, output_dim: int) -> str:
+    """
+    Resolve latent root to the PCA directory matching output_dim.
+
+    Conventions supported:
+    - "latents/img_pca"        -> "latents/img_pca_<output_dim>"
+    - "latents/img_pca_{output_dim}" (format placeholder)
+    - explicit path (e.g., "latents/img_pca_128") remains unchanged
+    """
+    raw = str(latent_root)
+    if "{output_dim}" in raw:
+        return raw.format(output_dim=int(output_dim))
+
+    root = Path(raw)
+    if root.name == "img_pca":
+        return str(root.with_name(f"img_pca_{int(output_dim)}"))
+
+    return raw
+
+
 @dataclass
 class EEGEncoderConfig:
     # Data roots/splits:
@@ -150,9 +170,15 @@ def load_eeg_encoder_config(
         else:
             eeg_normalization = "zscore"
 
+    output_dim = int(data.get("output_dim", 512))
+    latent_root = _resolve_latent_root_for_output_dim(
+        latent_root=str(data.get("latent_root", "latents/img_pca")),
+        output_dim=output_dim,
+    )
+
     return EEGEncoderConfig(
         dataset_root=str(data.get("dataset_root", "datasets")),
-        latent_root=str(data.get("latent_root", "latents/img_pca")),
+        latent_root=latent_root,
         subject=str(data.get("subject", "sub-1")),
         split_seed=int(data.get("split_seed", 0)),
         class_subset=class_subset,
@@ -160,7 +186,7 @@ def load_eeg_encoder_config(
         eeg_normalization=str(eeg_normalization).lower(),
         eeg_zscore_eps=float(data.get("eeg_zscore_eps", 1e-6)),
         model_architecture=str(data.get("model_architecture", MODEL_ARCHITECTURE_ID)),
-        output_dim=int(data.get("output_dim", 512)),
+        output_dim=output_dim,
         temporal_filters=int(data.get("temporal_filters", 32)),
         depth_multiplier=int(data.get("depth_multiplier", 2)),
         temporal_kernel1=int(data.get("temporal_kernel1", 51)),

@@ -170,6 +170,28 @@ def load_checkpoint(checkpoint_path: Path) -> tuple[dict, dict]:
     return ckpt, saved_cfg
 
 
+def _resolve_latent_root_for_output_dim(latent_root: str, output_dim: int | None) -> str:
+    """
+    Resolve latent root to PCA directory matching output dimension.
+
+    Conventions supported:
+    - "latents/img_pca"        -> "latents/img_pca_<output_dim>"
+    - "latents/img_pca_{output_dim}" (format placeholder)
+    - explicit path (e.g., "latents/img_pca_128") remains unchanged
+    """
+    raw = str(latent_root)
+    if output_dim is None:
+        return raw
+    if "{output_dim}" in raw:
+        return raw.format(output_dim=int(output_dim))
+
+    root = Path(raw)
+    if root.name == "img_pca":
+        return str(root.with_name(f"img_pca_{int(output_dim)}"))
+
+    return raw
+
+
 def resolve_eval_overrides(
     saved_cfg: dict,
     ckpt: dict,
@@ -180,7 +202,12 @@ def resolve_eval_overrides(
     class_indices: list[int] | None,
 ) -> tuple[str, str, str, int, list[int] | None]:
     resolved_dataset_root = dataset_root or saved_cfg.get("dataset_root", "datasets")
-    resolved_latent_root = latent_root or saved_cfg.get("latent_root", "latents/img_pca")
+    resolved_output_dim = saved_cfg.get("output_dim", None)
+    latent_root_base = latent_root or saved_cfg.get("latent_root", "latents/img_pca")
+    resolved_latent_root = _resolve_latent_root_for_output_dim(
+        latent_root=str(latent_root_base),
+        output_dim=int(resolved_output_dim) if resolved_output_dim is not None else None,
+    )
     resolved_subject = subject or saved_cfg.get("subject", "sub-1")
     resolved_split_seed = split_seed if split_seed is not None else int(saved_cfg.get("split_seed", 0))
     resolved_class_indices = (
