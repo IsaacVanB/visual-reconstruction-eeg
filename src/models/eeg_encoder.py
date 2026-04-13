@@ -1,8 +1,7 @@
-from typing import Tuple
+from typing import Any, Tuple
 
 import torch
 from torch import nn
-
 
 class EEGEncoderCNN(nn.Module):
     """CNN encoder for EEG trials shaped [B, C, T].
@@ -21,66 +20,55 @@ class EEGEncoderCNN(nn.Module):
 
     def __init__(
         self,
-        eeg_channels: int = 17,
-        eeg_timesteps: int = 100,
-        output_dim: int = 512,
-        temporal_filters: int = 32,
-        depth_multiplier: int = 2,
-        temporal_kernel1: int = 51,
-        temporal_kernel3: int = 13,
-        pool1: int = 2,
-        pool3: int = 5,
-        dropout: float = 0.3,
+        eeg_channels: int,
+        eeg_timesteps: int,
+        output_dim: int,
     ) -> None:
         super().__init__()
-        if temporal_kernel1 <= 0 or temporal_kernel3 <= 0:
-            raise ValueError("temporal kernels must be positive.")
-        if pool1 <= 0 or pool3 <= 0:
-            raise ValueError("pool sizes must be positive.")
-
-        # Constraint from grouped convolution below:
-        # groups=temporal_filters means out_channels must be a multiple of temporal_filters.
-        block2_channels = temporal_filters * depth_multiplier
+        if eeg_channels <= 0 or eeg_timesteps <= 0:
+            raise ValueError("eeg_channels and eeg_timesteps must be positive.")
+        if output_dim <= 0:
+            raise ValueError("output_dim must be positive.")
 
         # Block 1: temporal filtering.
         # Change kernel/pool here to alter temporal context and compression.
         self.block1 = nn.Sequential(
             nn.Conv2d(
                 in_channels=1,
-                out_channels=temporal_filters,
-                kernel_size=(1, temporal_kernel1),
-                padding=(0, temporal_kernel1 // 2),
+                out_channels=32,
+                kernel_size=(1, 51),
+                padding=(0, 25),
                 bias=False,
             ),
-            nn.BatchNorm2d(temporal_filters),
+            nn.BatchNorm2d(32),
             nn.ELU(inplace=True),
-            nn.AvgPool2d(kernel_size=(1, pool1)),
+            nn.AvgPool2d(kernel_size=(1, 2)),
         )
         # Block 2: depthwise spatial mixing across EEG channels.
         # kernel_size=(eeg_channels,1) collapses spatial channel dimension to 1.
         self.block2 = nn.Sequential(
             nn.Conv2d(
-                in_channels=temporal_filters,
-                out_channels=block2_channels,
+                in_channels=32,
+                out_channels=64,
                 kernel_size=(eeg_channels, 1),
-                groups=temporal_filters,
+                groups=32,
                 bias=False,
             ),
-            nn.BatchNorm2d(block2_channels),
+            nn.BatchNorm2d(64),
             nn.ELU(inplace=True),
         )
         # Block 3: additional temporal modeling + downsampling.
         self.block3 = nn.Sequential(
             nn.Conv2d(
-                in_channels=block2_channels,
-                out_channels=block2_channels,
-                kernel_size=(1, temporal_kernel3),
-                padding=(0, temporal_kernel3 // 2),
+                in_channels=64,
+                out_channels=64,
+                kernel_size=(1, 13),
+                padding=(0, 6),
                 bias=False,
             ),
-            nn.BatchNorm2d(block2_channels),
+            nn.BatchNorm2d(64),
             nn.ELU(inplace=True),
-            nn.AvgPool2d(kernel_size=(1, pool3)),
+            nn.AvgPool2d(kernel_size=(1, 5)),
         )
 
         # Shape inference keeps head dimensions valid after architecture edits.
@@ -95,7 +83,7 @@ class EEGEncoderCNN(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(flat_dim, 1024),
             nn.ELU(inplace=True),
-            nn.Dropout(p=dropout),
+            nn.Dropout(p=0.3),
             nn.Linear(1024, output_dim),
         )
 
@@ -119,3 +107,22 @@ def infer_eeg_shape(sample: torch.Tensor) -> Tuple[int, int]:
     if sample.ndim != 2:
         raise ValueError(f"Expected single EEG sample [C, T], got {tuple(sample.shape)}")
     return int(sample.shape[0]), int(sample.shape[1])
+
+
+def extract_eeg_encoder_cnn_arch_metadata(model: EEGEncoderCNN) -> dict[str, Any]:
+    """Serialize architecture-defining values used to construct this model instance."""
+    conv1 = model.block1[0]
+    pool1 = model.block1[3]
+    conv2 = model.block2[0]
+    conv3 = model.block3[0]
+    pool3 = model.block3[3]
+    dropout = model.head[2]
+    return {
+        "temporal_filters": int(conv1.out_channels),
+        "depth_multiplier": int(conv2.out_channels // conv1.out_channels),
+        "temporal_kernel1": int(conv1.kernel_size[1]),
+        "temporal_kernel3": int(conv3.kernel_size[1]),
+        "pool1": int(pool1.kernel_size[1]),
+        "pool3": int(pool3.kernel_size[1]),
+        "dropout": float(dropout.p),
+    }

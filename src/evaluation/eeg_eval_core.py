@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from src.data import build_eeg_transform
-from src.models import EEGEncoderCNN
+from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
 
 
 warnings.filterwarnings(
@@ -292,6 +292,66 @@ def is_1d_checkpoint(model_state_dict: dict[str, torch.Tensor]) -> bool:
     return isinstance(w, torch.Tensor) and w.ndim == 3
 
 
+def _resolve_saved_eeg_encoder_arch_metadata(saved_cfg: dict) -> dict[str, int | float] | None:
+    explicit = saved_cfg.get("model_architecture_params")
+    if isinstance(explicit, dict):
+        return {
+            "temporal_filters": int(explicit["temporal_filters"]),
+            "depth_multiplier": int(explicit["depth_multiplier"]),
+            "temporal_kernel1": int(explicit["temporal_kernel1"]),
+            "temporal_kernel3": int(explicit["temporal_kernel3"]),
+            "pool1": int(explicit["pool1"]),
+            "pool3": int(explicit["pool3"]),
+            "dropout": float(explicit["dropout"]),
+        }
+
+    legacy_keys = (
+        "temporal_filters",
+        "depth_multiplier",
+        "temporal_kernel1",
+        "temporal_kernel3",
+        "pool1",
+        "pool3",
+        "dropout",
+    )
+    if all(key in saved_cfg for key in legacy_keys):
+        return {
+            "temporal_filters": int(saved_cfg["temporal_filters"]),
+            "depth_multiplier": int(saved_cfg["depth_multiplier"]),
+            "temporal_kernel1": int(saved_cfg["temporal_kernel1"]),
+            "temporal_kernel3": int(saved_cfg["temporal_kernel3"]),
+            "pool1": int(saved_cfg["pool1"]),
+            "pool3": int(saved_cfg["pool3"]),
+            "dropout": float(saved_cfg["dropout"]),
+        }
+    return None
+
+
+def _assert_matching_eeg_encoder_architecture(
+    model: EEGEncoderCNN,
+    saved_cfg: dict,
+) -> None:
+    saved_arch = _resolve_saved_eeg_encoder_arch_metadata(saved_cfg)
+    if saved_arch is None:
+        return
+    current_arch = extract_eeg_encoder_cnn_arch_metadata(model)
+    mismatches: list[str] = []
+    for key, expected in saved_arch.items():
+        got = current_arch[key]
+        if key == "dropout":
+            if abs(float(got) - float(expected)) > 1e-8:
+                mismatches.append(f"{key}: checkpoint={expected}, code={got}")
+            continue
+        if int(got) != int(expected):
+            mismatches.append(f"{key}: checkpoint={expected}, code={got}")
+    if mismatches:
+        raise ValueError(
+            "EEGEncoderCNN architecture in code does not match checkpoint metadata. "
+            "Update src/models/eeg_encoder.py to match the training architecture or use the "
+            f"original checkpoint code. Mismatches: {'; '.join(mismatches)}"
+        )
+
+
 def build_model_for_checkpoint(
     model_state_dict: dict[str, torch.Tensor],
     sample_eeg: torch.Tensor,
@@ -312,14 +372,8 @@ def build_model_for_checkpoint(
             eeg_channels=int(sample_eeg.shape[0]),
             eeg_timesteps=int(sample_eeg.shape[1]),
             output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
-            temporal_filters=int(saved_cfg.get("temporal_filters", 32)),
-            depth_multiplier=int(saved_cfg.get("depth_multiplier", 2)),
-            temporal_kernel1=int(saved_cfg.get("temporal_kernel1", 51)),
-            temporal_kernel3=int(saved_cfg.get("temporal_kernel3", 13)),
-            pool1=int(saved_cfg.get("pool1", 2)),
-            pool3=int(saved_cfg.get("pool3", 5)),
-            dropout=float(saved_cfg.get("dropout", 0.3)),
         ).to(device)
+        _assert_matching_eeg_encoder_architecture(model=model, saved_cfg=saved_cfg)
         print(f"Detected checkpoint architecture: {saved_cfg.get('model_architecture')}")
         return model
 
@@ -335,14 +389,8 @@ def build_model_for_checkpoint(
         eeg_channels=int(sample_eeg.shape[0]),
         eeg_timesteps=int(sample_eeg.shape[1]),
         output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
-        temporal_filters=int(saved_cfg.get("temporal_filters", 32)),
-        depth_multiplier=int(saved_cfg.get("depth_multiplier", 2)),
-        temporal_kernel1=int(saved_cfg.get("temporal_kernel1", 51)),
-        temporal_kernel3=int(saved_cfg.get("temporal_kernel3", 13)),
-        pool1=int(saved_cfg.get("pool1", 2)),
-        pool3=int(saved_cfg.get("pool3", 5)),
-        dropout=float(saved_cfg.get("dropout", 0.3)),
     ).to(device)
+    _assert_matching_eeg_encoder_architecture(model=model, saved_cfg=saved_cfg)
     print("Detected checkpoint architecture: EEGNet-style CNN (inferred)")
     return model
 

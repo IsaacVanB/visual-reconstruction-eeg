@@ -18,13 +18,6 @@ def parse_args():
     parser.add_argument("--class-indices", type=int, nargs="+")
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--output-dim", type=int)
-    parser.add_argument("--temporal-filters", type=int)
-    parser.add_argument("--depth-multiplier", type=int)
-    parser.add_argument("--temporal-kernel1", type=int)
-    parser.add_argument("--temporal-kernel3", type=int)
-    parser.add_argument("--pool1", type=int)
-    parser.add_argument("--pool3", type=int)
-    parser.add_argument("--dropout", type=float)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--lr", type=float)
@@ -48,13 +41,6 @@ def main():
         "class_indices": args.class_indices,
         "split_seed": args.split_seed,
         "output_dim": args.output_dim,
-        "temporal_filters": args.temporal_filters,
-        "depth_multiplier": args.depth_multiplier,
-        "temporal_kernel1": args.temporal_kernel1,
-        "temporal_kernel3": args.temporal_kernel3,
-        "pool1": args.pool1,
-        "pool3": args.pool3,
-        "dropout": args.dropout,
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
         "lr": args.lr,

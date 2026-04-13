@@ -12,12 +12,30 @@ from torch.utils.data import DataLoader
 import yaml
 
 from src.data import EEGImageLatentDataset, build_eeg_transform
-from src.models import EEGEncoderCNN
+from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
 
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
-MODEL_ARCHITECTURE_ID = "eeg_encoder_cnn_2d_eegnet_v1"
 SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
+SUPPORTED_EEG_NORMALIZATION = {"l2", "zscore", "none"}
+REQUIRED_CONFIG_KEYS = (
+    "dataset_root",
+    "latent_root",
+    "subject",
+    "split_seed",
+    "class_subset",
+    "model_architecture",
+    "output_dim",
+    "batch_size",
+    "num_workers",
+    "lr",
+    "weight_decay",
+    "epochs",
+    "device",
+    "output_dir",
+    "eeg_normalization",
+    "eeg_zscore_eps",
+)
 
 
 def _mps_is_available() -> bool:
@@ -86,47 +104,50 @@ class EEGEncoderConfig:
     # Data roots/splits:
     # - Keep dataset_root + latent_root synchronized to the same preprocessing run.
     # - class_indices lets you run controlled subset experiments.
-    dataset_root: str = "datasets"
-    latent_root: str = "latents/img_pca"
-    subject: str = "sub-1"
-    split_seed: int = 0
-    class_subset: str = "default100"  # one of: default100, all
-    class_indices: Optional[Sequence[int]] = tuple(DEFAULT_CLASS_INDICES)
+    dataset_root: str
+    latent_root: str
+    subject: str
+    split_seed: int
+    class_subset: str  # one of: default100, all
+    class_indices: Optional[Sequence[int]]
 
     # Model architecture knobs:
     # - output_dim MUST match PCA latent dimension (k) used as target.
-    # - temporal_* and pooling values control temporal receptive field/compression.
-    model_architecture: str = MODEL_ARCHITECTURE_ID
-    output_dim: int = 512
-    temporal_filters: int = 32
-    depth_multiplier: int = 2
-    temporal_kernel1: int = 51
-    temporal_kernel3: int = 13
-    pool1: int = 2
-    pool3: int = 5
-    dropout: float = 0.3
+    # - temporal/pooling/dropout are tuned directly in src/models/eeg_encoder.py.
+    model_architecture: str
+    output_dim: int
 
     # Optimization knobs:
-    batch_size: int = 64
-    num_workers: int = 0
-    lr: float = 1e-3
-    weight_decay: float = 1e-4
-    epochs: int = 20
+    batch_size: int
+    num_workers: int
+    lr: float
+    weight_decay: float
+    epochs: int
 
     # Runtime/output:
-    device: str = "auto"
-    output_dir: str = "outputs/eeg_encoder"
+    device: str
+    output_dir: str
 
     # EEG preprocessing:
     # Keep this aligned between train and eval for consistent feature scale.
-    eeg_normalization: str = "zscore"  # one of: l2, zscore, none
-    eeg_zscore_eps: float = 1e-6
-    eeg_l2_normalize: bool = True
-    pin_memory: bool = False
+    eeg_normalization: str  # one of: l2, zscore, none
+    eeg_zscore_eps: float
+    eeg_l2_normalize: bool
+    pin_memory: bool
 
     # Evaluation default:
     # Number of test samples to decode during eval when no CLI cap is provided.
-    eval_max_samples: Optional[int] = 16
+    eval_max_samples: Optional[int]
+
+
+def _validate_required_config_keys(data: dict[str, Any], config_path: str) -> None:
+    missing = [key for key in REQUIRED_CONFIG_KEYS if key not in data]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(
+            f"Missing required keys in {config_path}: {joined}. "
+            "Set them in configs/eeg_encoder.yaml or via CLI overrides."
+        )
 
 
 def load_eeg_encoder_config(
@@ -143,10 +164,11 @@ def load_eeg_encoder_config(
         for key, value in overrides.items():
             if value is not None:
                 data[key] = value
+    _validate_required_config_keys(data=data, config_path=config_path)
 
     class_indices_override = overrides.get("class_indices") if overrides else None
     class_subset_override = overrides.get("class_subset") if overrides else None
-    class_subset = str(data.get("class_subset", "default100")).lower()
+    class_subset = str(data["class_subset"]).lower()
     if class_subset_override is not None:
         class_subset = str(class_subset_override).lower()
     if class_subset not in SUPPORTED_CLASS_SUBSETS:
@@ -163,45 +185,53 @@ def load_eeg_encoder_config(
             class_indices = None
         else:
             class_indices = DEFAULT_CLASS_INDICES
-    eeg_normalization = data.get("eeg_normalization", None)
-    if eeg_normalization is None:
-        if "eeg_l2_normalize" in data:
-            eeg_normalization = "l2" if bool(data.get("eeg_l2_normalize", True)) else "none"
-        else:
-            eeg_normalization = "zscore"
+    eeg_normalization = str(data["eeg_normalization"]).lower()
+    if eeg_normalization not in SUPPORTED_EEG_NORMALIZATION:
+        raise ValueError(
+            "eeg_normalization must be one of "
+            f"{sorted(SUPPORTED_EEG_NORMALIZATION)}, got: {eeg_normalization}"
+        )
+    if "eeg_l2_normalize" in data:
+        legacy_l2_flag = bool(data["eeg_l2_normalize"])
+        derived_l2_flag = eeg_normalization == "l2"
+        if legacy_l2_flag != derived_l2_flag:
+            raise ValueError(
+                "Conflicting normalization settings: "
+                f"eeg_normalization={eeg_normalization!r} "
+                f"but eeg_l2_normalize={legacy_l2_flag}. "
+                "Use eeg_normalization only."
+            )
 
-    output_dim = int(data.get("output_dim", 512))
+    output_dim = int(data["output_dim"])
     latent_root = _resolve_latent_root_for_output_dim(
-        latent_root=str(data.get("latent_root", "latents/img_pca")),
+        latent_root=str(data["latent_root"]),
         output_dim=output_dim,
     )
+    model_architecture = str(data["model_architecture"]).strip()
+    if not model_architecture:
+        raise ValueError(
+            "model_architecture must be set in the YAML config or provided via overrides."
+        )
 
     return EEGEncoderConfig(
-        dataset_root=str(data.get("dataset_root", "datasets")),
+        dataset_root=str(data["dataset_root"]),
         latent_root=latent_root,
-        subject=str(data.get("subject", "sub-1")),
-        split_seed=int(data.get("split_seed", 0)),
+        subject=str(data["subject"]),
+        split_seed=int(data["split_seed"]),
         class_subset=class_subset,
         class_indices=(tuple(int(x) for x in class_indices) if class_indices is not None else None),
-        eeg_normalization=str(eeg_normalization).lower(),
-        eeg_zscore_eps=float(data.get("eeg_zscore_eps", 1e-6)),
-        model_architecture=str(data.get("model_architecture", MODEL_ARCHITECTURE_ID)),
+        eeg_normalization=eeg_normalization,
+        eeg_zscore_eps=float(data["eeg_zscore_eps"]),
+        model_architecture=model_architecture,
         output_dim=output_dim,
-        temporal_filters=int(data.get("temporal_filters", 32)),
-        depth_multiplier=int(data.get("depth_multiplier", 2)),
-        temporal_kernel1=int(data.get("temporal_kernel1", 51)),
-        temporal_kernel3=int(data.get("temporal_kernel3", 13)),
-        pool1=int(data.get("pool1", 2)),
-        pool3=int(data.get("pool3", 5)),
-        dropout=float(data.get("dropout", 0.3)),
-        batch_size=int(data.get("batch_size", 64)),
-        num_workers=int(data.get("num_workers", 0)),
-        lr=float(data.get("lr", 1e-3)),
-        weight_decay=float(data.get("weight_decay", 1e-4)),
-        epochs=int(data.get("epochs", 20)),
-        device=str(data.get("device", "auto")),
-        output_dir=str(data.get("output_dir", "outputs/eeg_encoder")),
-        eeg_l2_normalize=bool(data.get("eeg_l2_normalize", True)),
+        batch_size=int(data["batch_size"]),
+        num_workers=int(data["num_workers"]),
+        lr=float(data["lr"]),
+        weight_decay=float(data["weight_decay"]),
+        epochs=int(data["epochs"]),
+        device=str(data["device"]),
+        output_dir=str(data["output_dir"]),
+        eeg_l2_normalize=(eeg_normalization == "l2"),
         pin_memory=bool(data.get("pin_memory", False)),
         eval_max_samples=(
             int(data["eval_max_samples"])
@@ -339,8 +369,10 @@ def _save_artifacts(
 ) -> dict[str, Path]:
     saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
     ckpt_path = output_dir / f"eeg_encoder_{saved_at}.pt"
+    arch_metadata = extract_eeg_encoder_cnn_arch_metadata(model)
     config_payload = dict(config.__dict__)
-    config_payload["model_architecture"] = MODEL_ARCHITECTURE_ID
+    config_payload["model_architecture"] = config.model_architecture
+    config_payload["model_architecture_params"] = arch_metadata
     if eeg_zscore_stats is not None:
         config_payload["eeg_zscore_mean"] = eeg_zscore_stats["mean"]
         config_payload["eeg_zscore_std"] = eeg_zscore_stats["std"]
@@ -350,7 +382,8 @@ def _save_artifacts(
             "model_state_dict": model.state_dict(),
             "config": config_payload,
             "class_indices": list(config.class_indices) if config.class_indices is not None else None,
-            "model_architecture": MODEL_ARCHITECTURE_ID,
+            "model_architecture": config.model_architecture,
+            "model_architecture_params": arch_metadata,
             "eeg_zscore_stats": eeg_zscore_stats,
             "saved_at": saved_at,
         },
@@ -442,13 +475,6 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         eeg_channels=eeg_channels,
         eeg_timesteps=eeg_timesteps,
         output_dim=config.output_dim,
-        temporal_filters=config.temporal_filters,
-        depth_multiplier=config.depth_multiplier,
-        temporal_kernel1=config.temporal_kernel1,
-        temporal_kernel3=config.temporal_kernel3,
-        pool1=config.pool1,
-        pool3=config.pool3,
-        dropout=config.dropout,
     ).to(device)
     # Optimizer can be swapped freely (AdamW/Adam/SGD), but keep LR/WD ranges appropriate.
     optimizer = torch.optim.AdamW(
