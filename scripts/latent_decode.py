@@ -15,6 +15,8 @@ warnings.filterwarnings(
     module="huggingface_hub.utils._validators",
 )
 
+SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -100,6 +102,88 @@ def _extract_latent_tensor(obj, latent_key: str | None) -> torch.Tensor:
     raise TypeError(f"Unsupported latent object type: {type(obj)}")
 
 
+def _load_json_if_exists(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise TypeError(f"Expected JSON object in {path}, got {type(payload)}")
+    return payload
+
+
+def _infer_pca_metadata_path(pca_params_path: Path) -> Path | None:
+    pca_dir = pca_params_path.parent
+    candidates = [
+        pca_dir / f"{pca_dir.name}_metadata.json",
+        pca_dir.parent / f"{pca_dir.name}_metadata.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _validate_pca_latent_compatibility(
+    latent_path: Path,
+    pca_params_path: Path,
+    pca_params: dict,
+) -> None:
+    pca_metadata_path = _infer_pca_metadata_path(pca_params_path)
+    if pca_metadata_path is None:
+        return
+    pca_meta = _load_json_if_exists(pca_metadata_path)
+    if not pca_meta:
+        return
+
+    pca_components = pca_params["pca_components"]
+    if not isinstance(pca_components, torch.Tensor) or pca_components.ndim != 2:
+        raise ValueError("PCA params must contain tensor pca_components with shape [k, D].")
+    k = int(pca_components.shape[0])
+    standardized = bool(pca_params.get("pca_standardized", False))
+
+    if "n_components" in pca_meta and int(pca_meta["n_components"]) != k:
+        raise ValueError(
+            f"PCA params/metadata mismatch: params k={k}, metadata n_components={pca_meta['n_components']} "
+            f"in {pca_metadata_path}."
+        )
+    if "pca_standardized" in pca_meta and bool(pca_meta["pca_standardized"]) != standardized:
+        raise ValueError(
+            "PCA params/metadata mismatch for standardization flag: "
+            f"params pca_standardized={standardized}, "
+            f"metadata pca_standardized={pca_meta['pca_standardized']} "
+            f"in {pca_metadata_path}."
+        )
+
+    if "pca_params_path" in pca_meta:
+        metadata_params_path = Path(str(pca_meta["pca_params_path"])).expanduser()
+        if not metadata_params_path.exists():
+            raise ValueError(
+                f"PCA metadata points to missing pca_params_path: {metadata_params_path}. "
+                f"Metadata file: {pca_metadata_path}. "
+                "Regenerate metadata or pass matching files."
+            )
+        if metadata_params_path.resolve() != pca_params_path.resolve():
+            raise ValueError(
+                "Provided --pca-params-path does not match metadata pca_params_path. "
+                f"provided={pca_params_path.resolve()} metadata={metadata_params_path.resolve()} "
+                f"(metadata file: {pca_metadata_path})"
+            )
+
+    if "pca_embedding_dir" in pca_meta:
+        metadata_embed_dir = Path(str(pca_meta["pca_embedding_dir"])).expanduser()
+        if not metadata_embed_dir.exists():
+            raise ValueError(
+                f"PCA metadata points to missing pca_embedding_dir: {metadata_embed_dir}. "
+                f"Metadata file: {pca_metadata_path}."
+            )
+        if latent_path.parent.resolve() != metadata_embed_dir.resolve():
+            raise ValueError(
+                "Latent file directory does not match PCA metadata embedding directory. "
+                f"latent_dir={latent_path.parent.resolve()} metadata_dir={metadata_embed_dir.resolve()} "
+                f"(metadata file: {pca_metadata_path})"
+            )
+
+
 def tensor_to_pil(image_chw_01: torch.Tensor) -> Image.Image:
     image_np = (
         image_chw_01.detach()
@@ -114,6 +198,16 @@ def tensor_to_pil(image_chw_01: torch.Tensor) -> Image.Image:
     return Image.fromarray(image_np)
 
 
+def _validate_output_image_path(output_path: Path) -> None:
+    suffix = output_path.suffix.lower()
+    if suffix not in SUPPORTED_IMAGE_SUFFIXES:
+        allowed = ", ".join(sorted(SUPPORTED_IMAGE_SUFFIXES))
+        raise ValueError(
+            f"--output-path must be an image file extension, got: {output_path} "
+            f"(supported: {allowed})"
+        )
+
+
 def main():
     args = parse_args()
 
@@ -121,6 +215,7 @@ def main():
     pca_params_path = Path(args.pca_params_path)
     metadata_path = Path(args.metadata_path)
     output_path = Path(args.output_path)
+    _validate_output_image_path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not latent_path.exists():
@@ -136,6 +231,11 @@ def main():
         raise TypeError("PCA params file must contain a dict.")
     if "pca_mean" not in pca_params or "pca_components" not in pca_params:
         raise KeyError("PCA params must contain 'pca_mean' and 'pca_components'.")
+    _validate_pca_latent_compatibility(
+        latent_path=latent_path,
+        pca_params_path=pca_params_path,
+        pca_params=pca_params,
+    )
 
     pca_mean = pca_params["pca_mean"].to(dtype=torch.float32).flatten()         # [D]
     pca_components = pca_params["pca_components"].to(dtype=torch.float32)       # [k, D]

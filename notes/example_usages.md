@@ -93,7 +93,7 @@ Decodes PCA-space latent vectors by inverse PCA + inverse scaling + SD VAE decod
 Example usage (all CLI params):
 ```bash
 python scripts/latent_decode.py \
-  --latent-path latents/img_pca/000090.pt \
+  --latent-path latents/img_pca/000000.pt \
   --pca-params-path latents/img_pca/pca_128.pt \
   --output-path outputs/latent_decode.png \
   --vae-name stabilityai/sd-vae-ft-mse \
