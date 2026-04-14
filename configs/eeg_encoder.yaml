@@ -5,7 +5,7 @@ subject: sub-1
 split_seed: 0
 
 # Match latent PCA dimensionality.
-output_dim: 128
+output_dim: 32
 
 # EEG encoder architecture identifier.
 # Temporal/pooling/dropout hyperparameters are configured directly in src/models/eeg_encoder.py.

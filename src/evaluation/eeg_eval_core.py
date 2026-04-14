@@ -292,18 +292,10 @@ def is_1d_checkpoint(model_state_dict: dict[str, torch.Tensor]) -> bool:
     return isinstance(w, torch.Tensor) and w.ndim == 3
 
 
-def _resolve_saved_eeg_encoder_arch_metadata(saved_cfg: dict) -> dict[str, int | float] | None:
+def _resolve_saved_eeg_encoder_arch_metadata(saved_cfg: dict) -> dict | None:
     explicit = saved_cfg.get("model_architecture_params")
     if isinstance(explicit, dict):
-        return {
-            "temporal_filters": int(explicit["temporal_filters"]),
-            "depth_multiplier": int(explicit["depth_multiplier"]),
-            "temporal_kernel1": int(explicit["temporal_kernel1"]),
-            "temporal_kernel3": int(explicit["temporal_kernel3"]),
-            "pool1": int(explicit["pool1"]),
-            "pool3": int(explicit["pool3"]),
-            "dropout": float(explicit["dropout"]),
-        }
+        return dict(explicit)
 
     legacy_keys = (
         "temporal_filters",
@@ -327,23 +319,24 @@ def _resolve_saved_eeg_encoder_arch_metadata(saved_cfg: dict) -> dict[str, int |
     return None
 
 
-def _assert_matching_eeg_encoder_architecture(
-    model: EEGEncoderCNN,
-    saved_cfg: dict,
-) -> None:
+def _assert_matching_eeg_encoder_architecture(model: EEGEncoderCNN, saved_cfg: dict) -> None:
     saved_arch = _resolve_saved_eeg_encoder_arch_metadata(saved_cfg)
     if saved_arch is None:
         return
     current_arch = extract_eeg_encoder_cnn_arch_metadata(model)
     mismatches: list[str] = []
-    for key, expected in saved_arch.items():
-        got = current_arch[key]
-        if key == "dropout":
-            if abs(float(got) - float(expected)) > 1e-8:
-                mismatches.append(f"{key}: checkpoint={expected}, code={got}")
+    for key in sorted(saved_arch.keys()):
+        if key not in current_arch:
+            mismatches.append(f"{key}: missing_in_code (checkpoint={saved_arch[key]!r})")
             continue
-        if int(got) != int(expected):
-            mismatches.append(f"{key}: checkpoint={expected}, code={got}")
+        expected = saved_arch[key]
+        got = current_arch[key]
+        if isinstance(expected, float):
+            if not isinstance(got, (int, float)) or abs(float(got) - expected) > 1e-8:
+                mismatches.append(f"{key}: checkpoint={expected!r}, code={got!r}")
+            continue
+        if expected != got:
+            mismatches.append(f"{key}: checkpoint={expected!r}, code={got!r}")
     if mismatches:
         raise ValueError(
             "EEGEncoderCNN architecture in code does not match checkpoint metadata. "

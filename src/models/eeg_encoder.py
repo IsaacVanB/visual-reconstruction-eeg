@@ -3,20 +3,9 @@ from typing import Any, Tuple
 import torch
 from torch import nn
 
-class EEGEncoderCNN(nn.Module):
-    """CNN encoder for EEG trials shaped [B, C, T].
 
-    Architecture experimentation guide:
-    - Safe to change:
-      - `temporal_filters`, `depth_multiplier` (capacity/width).
-      - `temporal_kernel1`, `temporal_kernel3` (temporal receptive field).
-      - `pool1`, `pool3` (temporal downsampling).
-      - hidden head width (`1024`) and dropout/activation choices.
-    - Must stay consistent:
-      - Input convention is [B, C, T] where C=eeg channels, T=time points.
-      - Final projection dim must match training target dim (`output_dim`).
-      - Grouped conv in block2 requires `out_channels` divisible by `groups`.
-    """
+class EEGEncoderCNN(nn.Module):
+    """1D CNN encoder for EEG trials shaped [B, C, T]."""
 
     def __init__(
         self,
@@ -30,75 +19,61 @@ class EEGEncoderCNN(nn.Module):
         if output_dim <= 0:
             raise ValueError("output_dim must be positive.")
 
-        # Block 1: temporal filtering.
-        # Change kernel/pool here to alter temporal context and compression.
-        self.block1 = nn.Sequential(
-            nn.Conv2d(
-                in_channels=1,
-                out_channels=32,
-                kernel_size=(1, 51),
-                padding=(0, 25),
-                bias=False,
-            ),
-            nn.BatchNorm2d(32),
-            nn.ELU(inplace=True),
-            nn.AvgPool2d(kernel_size=(1, 2)),
-        )
-        # Block 2: depthwise spatial mixing across EEG channels.
-        # kernel_size=(eeg_channels,1) collapses spatial channel dimension to 1.
-        self.block2 = nn.Sequential(
-            nn.Conv2d(
-                in_channels=32,
-                out_channels=64,
-                kernel_size=(eeg_channels, 1),
-                groups=32,
-                bias=False,
-            ),
-            nn.BatchNorm2d(64),
-            nn.ELU(inplace=True),
-        )
-        # Block 3: additional temporal modeling + downsampling.
-        self.block3 = nn.Sequential(
-            nn.Conv2d(
+        # Requested architecture:
+        # Conv1d 17->64 k7 p3 -> BN -> GELU
+        # Conv1d 64->128 k5 p2 s2 -> BN -> GELU
+        # Conv1d 128->256 k5 p2 s2 -> BN -> GELU
+        # Conv1d 256->256 k3 p1 -> GELU
+        # Global average pool over time
+        # Linear 256->256 -> GELU -> Dropout(0.1) -> Linear 256->output_dim
+        self.features = nn.Sequential(
+            nn.Conv1d(in_channels=17, out_channels=64, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(
                 in_channels=64,
-                out_channels=64,
-                kernel_size=(1, 13),
-                padding=(0, 6),
+                out_channels=128,
+                kernel_size=5,
+                stride=2,
+                padding=2,
                 bias=False,
             ),
-            nn.BatchNorm2d(64),
-            nn.ELU(inplace=True),
-            nn.AvgPool2d(kernel_size=(1, 5)),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+            nn.Conv1d(
+                in_channels=128,
+                out_channels=256,
+                kernel_size=5,
+                stride=2,
+                padding=2,
+                bias=False,
+            ),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Conv1d(in_channels=256, out_channels=256, kernel_size=3, padding=1, bias=False),
+            nn.GELU(),
         )
-
-        # Shape inference keeps head dimensions valid after architecture edits.
-        with torch.no_grad():
-            dummy = torch.zeros(1, eeg_channels, eeg_timesteps)
-            features = self._forward_features(dummy)
-            flat_dim = int(features.flatten(start_dim=1).shape[1])
-
-        # Projection head:
-        # - You can replace with deeper MLP, residual MLP, or layer norm variants.
-        # - Final layer output must remain `output_dim`.
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
         self.head = nn.Sequential(
-            nn.Linear(flat_dim, 1024),
-            nn.ELU(inplace=True),
-            nn.Dropout(p=0.3),
-            nn.Linear(1024, output_dim),
+            nn.Linear(256, 256),
+            nn.GELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(256, output_dim),
         )
 
     def _forward_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(f"Expected input with shape [B, C, T], got {tuple(x.shape)}")
-        x = x.unsqueeze(1)  # [B, 1, C, T]
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
+        if x.shape[1] != 17:
+            raise ValueError(
+                f"Expected EEG channels C=17 for this architecture, got C={int(x.shape[1])}."
+            )
+        x = self.features(x)
+        x = self.global_pool(x).squeeze(-1)  # [B, 256]
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._forward_features(x)
-        x = x.flatten(start_dim=1)
         return self.head(x)
 
 
@@ -109,20 +84,18 @@ def infer_eeg_shape(sample: torch.Tensor) -> Tuple[int, int]:
     return int(sample.shape[0]), int(sample.shape[1])
 
 
-def extract_eeg_encoder_cnn_arch_metadata(model: EEGEncoderCNN) -> dict[str, Any]:
-    """Serialize architecture-defining values used to construct this model instance."""
-    conv1 = model.block1[0]
-    pool1 = model.block1[3]
-    conv2 = model.block2[0]
-    conv3 = model.block3[0]
-    pool3 = model.block3[3]
-    dropout = model.head[2]
+def extract_eeg_encoder_cnn_arch_metadata(_model: EEGEncoderCNN) -> dict[str, Any]:
+    """Serialize architecture-defining values for robust checkpoint reload validation."""
     return {
-        "temporal_filters": int(conv1.out_channels),
-        "depth_multiplier": int(conv2.out_channels // conv1.out_channels),
-        "temporal_kernel1": int(conv1.kernel_size[1]),
-        "temporal_kernel3": int(conv3.kernel_size[1]),
-        "pool1": int(pool1.kernel_size[1]),
-        "pool3": int(pool3.kernel_size[1]),
-        "dropout": float(dropout.p),
+        "frontend": "conv1d",
+        "in_channels": 17,
+        "channels": [64, 128, 256, 256],
+        "kernels": [7, 5, 5, 3],
+        "strides": [1, 2, 2, 1],
+        "paddings": [3, 2, 2, 1],
+        "norm": "batchnorm1d",
+        "activation": "gelu",
+        "global_pool": "adaptive_avg_pool1d_1",
+        "head_hidden_dim": 256,
+        "head_dropout": 0.1,
     }
