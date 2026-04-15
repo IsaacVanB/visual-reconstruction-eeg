@@ -1,15 +1,12 @@
 # Data
 dataset_root: datasets
-latent_root: latents/img_pca
+# Directory containing image latents (PCA targets) for EEG training.
+image_latent_root: latents/img_pca_64_b
 subject: sub-1
 split_seed: 0
 
 # Match latent PCA dimensionality.
 output_dim: 64
-
-# EEG encoder architecture identifier.
-# Temporal/pooling/dropout hyperparameters are configured directly in src/models/eeg_encoder.py.
-model_architecture: eeg_encoder_cnn_2d_eegnet_v1
 
 # Optimization
 batch_size: 16

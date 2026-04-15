@@ -12,6 +12,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train EEG CNN encoder against PCA latents.")
     parser.add_argument("--config", default="configs/eeg_encoder.yaml")
     parser.add_argument("--dataset-root")
+    parser.add_argument("--image-latent-root")
     parser.add_argument("--latent-root")
     parser.add_argument("--subject")
     parser.add_argument("--class-subset", choices=["default100", "all"])
@@ -35,6 +36,7 @@ def main():
     args = parse_args()
     overrides = {
         "dataset_root": args.dataset_root,
+        "image_latent_root": args.image_latent_root,
         "latent_root": args.latent_root,
         "subject": args.subject,
         "class_subset": args.class_subset,

@@ -28,7 +28,7 @@ class EEGEncoderCNN(nn.Module):
         # Linear 256->256 -> GELU -> Dropout(0.1) -> Linear 256->output_dim
         self.features = nn.Sequential(
             nn.Conv1d(in_channels=17, out_channels=64, kernel_size=7, padding=3, bias=False),
-            nn.BatchNorm1d(64),
+            nn.LayerNorm(64),
             nn.GELU(),
             nn.Conv1d(
                 in_channels=64,
@@ -38,7 +38,7 @@ class EEGEncoderCNN(nn.Module):
                 padding=2,
                 bias=False,
             ),
-            nn.BatchNorm1d(128),
+            nn.LayerNorm(128),
             nn.GELU(),
             nn.Conv1d(
                 in_channels=128,
@@ -48,7 +48,7 @@ class EEGEncoderCNN(nn.Module):
                 padding=2,
                 bias=False,
             ),
-            nn.BatchNorm1d(256),
+            nn.LayerNorm(256),
             nn.GELU(),
             nn.Conv1d(in_channels=256, out_channels=256, kernel_size=3, padding=1, bias=False),
             nn.GELU(),
@@ -93,7 +93,7 @@ def extract_eeg_encoder_cnn_arch_metadata(_model: EEGEncoderCNN) -> dict[str, An
         "kernels": [7, 5, 5, 3],
         "strides": [1, 2, 2, 1],
         "paddings": [3, 2, 2, 1],
-        "norm": "batchnorm1d",
+        "norm": "layernorm",
         "activation": "gelu",
         "global_pool": "adaptive_avg_pool1d_1",
         "head_hidden_dim": 256,

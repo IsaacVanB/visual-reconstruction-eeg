@@ -292,6 +292,11 @@ def is_1d_checkpoint(model_state_dict: dict[str, torch.Tensor]) -> bool:
     return isinstance(w, torch.Tensor) and w.ndim == 3
 
 
+def is_current_eeg_encoder_cnn_checkpoint(model_state_dict: dict[str, torch.Tensor]) -> bool:
+    # Current training model (`src/models/eeg_encoder.py`) uses `features.*` + `head.*` modules.
+    return any(k.startswith("features.") for k in model_state_dict.keys())
+
+
 def _resolve_saved_eeg_encoder_arch_metadata(saved_cfg: dict) -> dict | None:
     explicit = saved_cfg.get("model_architecture_params")
     if isinstance(explicit, dict):
@@ -352,6 +357,26 @@ def build_model_for_checkpoint(
     saved_cfg: dict,
     device: torch.device,
 ) -> nn.Module:
+    # Always trust the checkpoint parameter structure first so eval can reliably
+    # reload the model that was just trained, even if config strings drift.
+    if is_current_eeg_encoder_cnn_checkpoint(model_state_dict):
+        model = EEGEncoderCNN(
+            eeg_channels=int(sample_eeg.shape[0]),
+            eeg_timesteps=int(sample_eeg.shape[1]),
+            output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
+        ).to(device)
+        _assert_matching_eeg_encoder_architecture(model=model, saved_cfg=saved_cfg)
+        print("Detected checkpoint architecture: EEGEncoderCNN (state_dict)")
+        return model
+
+    if is_1d_checkpoint(model_state_dict):
+        model = EEGEncoderCNN1D(
+            eeg_channels=int(sample_eeg.shape[0]),
+            output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
+        ).to(device)
+        print("Detected checkpoint architecture: EEGEncoderCNN1D (state_dict)")
+        return model
+
     explicit_architecture = str(saved_cfg.get("model_architecture", "")).lower()
     if "1d" in explicit_architecture:
         model = EEGEncoderCNN1D(
@@ -368,14 +393,6 @@ def build_model_for_checkpoint(
         ).to(device)
         _assert_matching_eeg_encoder_architecture(model=model, saved_cfg=saved_cfg)
         print(f"Detected checkpoint architecture: {saved_cfg.get('model_architecture')}")
-        return model
-
-    if is_1d_checkpoint(model_state_dict):
-        model = EEGEncoderCNN1D(
-            eeg_channels=int(sample_eeg.shape[0]),
-            output_dim=int(saved_cfg.get("output_dim", sample_latent.numel())),
-        ).to(device)
-        print("Detected checkpoint architecture: 1D CNN (inferred)")
         return model
 
     model = EEGEncoderCNN(

@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "--embedding-type",
         choices=["full", "pca", "both"],
-        default="both",
+        default="pca",
         help="What to produce: full latents, PCA latents, or both.",
     )
     parser.add_argument(
@@ -106,8 +106,17 @@ def parse_args():
         "--standardize-pca",
         action="store_true",
         help=(
-            "Standardize PCA outputs using train-set mean/std per component. "
-            "Applies same transform to valid split and stores stats in PCA params."
+            "Standardize PCA outputs using mean/std over the scope selected by "
+            "--pca-scope. Applies the same transform to all saved splits."
+        ),
+    )
+    parser.add_argument(
+        "--pca-scope",
+        choices=["train", "train_valid"],
+        default="train",
+        help=(
+            "Scope used to fit PCA basis and (if enabled) PCA-space standardization stats. "
+            "'train' matches prior behavior; 'train_valid' uses both splits."
         ),
     )
     parser.add_argument(
@@ -265,15 +274,19 @@ def _run_pca(
 
     train_paths = [_latent_path_for_id(image_id) for image_id in train_image_ids]
     valid_paths = [_latent_path_for_id(image_id) for image_id in valid_image_ids]
+    if args.pca_scope == "train":
+        fit_paths = train_paths
+    else:
+        fit_paths = train_paths + valid_paths
 
     flat_rows = []
-    for path in train_paths:
+    for path in fit_paths:
         z = _load_pt_tensor(path).to(dtype=torch.float32, device="cpu")
         flat_rows.append(z.reshape(-1))
-    x = torch.stack(flat_rows, dim=0)  # [N, D]
+    x_fit = torch.stack(flat_rows, dim=0)  # [N_fit, D]
 
-    n_samples, n_features = x.shape
-    max_rank = max(min(n_samples - 1, n_features), 1)
+    n_fit_samples, n_features = x_fit.shape
+    max_rank = max(min(n_fit_samples - 1, n_features), 1)
     k = min(args.n_components, max_rank)
     if k <= 0:
         raise ValueError(f"Invalid PCA components: {args.n_components}")
@@ -283,32 +296,41 @@ def _run_pca(
             f"(max valid rank with centered data is {max_rank})."
         )
 
-    mean = x.mean(dim=0, keepdim=True)
-    x_centered = x - mean
+    mean = x_fit.mean(dim=0, keepdim=True)
+    x_centered = x_fit - mean
     _, s, v_t = torch.linalg.svd(x_centered, full_matrices=False)
     components = v_t[:k]  # [k, D]
-    x_pca_train = x_centered @ components.T  # [N_train, k]
-    explained_variance = (s[:k] ** 2) / max(n_samples - 1, 1)
+    explained_variance = (s[:k] ** 2) / max(n_fit_samples - 1, 1)
 
-    # Optional z-score standardization in PCA space using train split only.
+    def _to_pca(path: Path) -> torch.Tensor:
+        z = _load_pt_tensor(path).to(dtype=torch.float32, device="cpu")
+        z_flat = z.reshape(-1).unsqueeze(0)  # [1, D]
+        return (z_flat - mean) @ components.T  # [1, k]
+
+    # Optional z-score standardization in PCA space using selected fit scope.
     pca_train_mean = None
     pca_train_std = None
     if args.standardize_pca:
-        pca_train_mean = x_pca_train.mean(dim=0, keepdim=True)  # [1, k]
-        pca_train_std = x_pca_train.std(dim=0, unbiased=False, keepdim=True).clamp_min(
+        stat_paths = fit_paths
+        stat_rows = [_to_pca(path) for path in stat_paths]
+        x_pca_stats = torch.cat(stat_rows, dim=0)  # [N_stats, k]
+        pca_train_mean = x_pca_stats.mean(dim=0, keepdim=True)  # [1, k]
+        pca_train_std = x_pca_stats.std(dim=0, unbiased=False, keepdim=True).clamp_min(
             float(args.pca_std_eps)
         )  # [1, k]
-        x_pca_train = (x_pca_train - pca_train_mean) / pca_train_std
 
     out_dtype = torch.float16 if args.pca_save_dtype == "float16" else torch.float32
-    for i, path in enumerate(train_paths):
+    for path in train_paths:
+        z_pca = _to_pca(path)
+        if args.standardize_pca:
+            if pca_train_mean is None or pca_train_std is None:
+                raise RuntimeError("Internal error: missing PCA standardization stats.")
+            z_pca = (z_pca - pca_train_mean) / pca_train_std
         out_path = pca_dir / path.name
-        torch.save(x_pca_train[i].to(out_dtype), out_path)
+        torch.save(z_pca[0].to(out_dtype), out_path)
 
     for path in valid_paths:
-        z = _load_pt_tensor(path).to(dtype=torch.float32, device="cpu")
-        z_flat = z.reshape(-1).unsqueeze(0)  # [1, D]
-        z_pca = (z_flat - mean) @ components.T  # [1, k]
+        z_pca = _to_pca(path)
         if args.standardize_pca:
             if pca_train_mean is None or pca_train_std is None:
                 raise RuntimeError("Internal error: missing PCA standardization stats.")
@@ -341,7 +363,9 @@ def _run_pca(
         "pca_embedding_dir": str(pca_dir),
         "n_components": int(k),
         "n_features": int(n_features),
-        "fit_num_samples_train": int(n_samples),
+        "pca_scope": str(args.pca_scope),
+        "fit_num_samples_pca_basis": int(n_fit_samples),
+        "fit_num_samples_train": int(len(train_paths)),
         "transform_num_samples_valid": int(len(valid_paths)),
         "pca_save_dtype": args.pca_save_dtype,
         "pca_standardized": bool(args.standardize_pca),
@@ -365,12 +389,15 @@ def _run_pca(
     pca_metadata_path = output_root / f"{args.pca_dir_name}_metadata.json"
     pca_metadata_path.write_text(json.dumps(pca_metadata, indent=2))
 
-    print(f"Fitted PCA on train split only: {len(train_paths)} embeddings")
+    print(
+        f"Fitted PCA on scope '{args.pca_scope}': {n_fit_samples} embeddings "
+        f"(train={len(train_paths)}, valid={len(valid_paths)})."
+    )
     print(f"Applied same PCA transform to valid split: {len(valid_paths)} embeddings")
-    print(f"Input flattened train shape: ({n_samples}, {n_features})")
+    print(f"Input flattened fit shape: ({n_fit_samples}, {n_features})")
     print(f"Output PCA embedding shape per file: ({k},)")
     if args.standardize_pca:
-        print("PCA outputs standardized with train-set per-component mean/std.")
+        print(f"PCA outputs standardized with scope '{args.pca_scope}' per-component mean/std.")
     print(f"Saved PCA embeddings to: {pca_dir}")
     print(f"Saved PCA params to: {pca_params_path}")
     print(f"Saved PCA metadata to: {pca_metadata_path}")

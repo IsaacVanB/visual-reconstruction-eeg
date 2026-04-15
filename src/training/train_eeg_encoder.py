@@ -20,11 +20,9 @@ SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
 SUPPORTED_EEG_NORMALIZATION = {"l2", "zscore", "none"}
 REQUIRED_CONFIG_KEYS = (
     "dataset_root",
-    "latent_root",
     "subject",
     "split_seed",
     "class_subset",
-    "model_architecture",
     "output_dim",
     "batch_size",
     "num_workers",
@@ -114,7 +112,6 @@ class EEGEncoderConfig:
     # Model architecture knobs:
     # - output_dim MUST match PCA latent dimension (k) used as target.
     # - temporal/pooling/dropout are tuned directly in src/models/eeg_encoder.py.
-    model_architecture: str
     output_dim: int
 
     # Optimization knobs:
@@ -147,6 +144,11 @@ def _validate_required_config_keys(data: dict[str, Any], config_path: str) -> No
         raise ValueError(
             f"Missing required keys in {config_path}: {joined}. "
             "Set them in configs/eeg_encoder.yaml or via CLI overrides."
+        )
+    if "image_latent_root" not in data and "latent_root" not in data:
+        raise ValueError(
+            f"Missing required key in {config_path}: image_latent_root (or legacy latent_root). "
+            "Set one of them in configs/eeg_encoder.yaml or via CLI overrides."
         )
 
 
@@ -203,16 +205,13 @@ def load_eeg_encoder_config(
             )
 
     output_dim = int(data["output_dim"])
+    raw_latent_root = data.get("image_latent_root", data.get("latent_root"))
+    if raw_latent_root is None:
+        raise ValueError("image_latent_root (or latent_root) must be provided.")
     latent_root = _resolve_latent_root_for_output_dim(
-        latent_root=str(data["latent_root"]),
+        latent_root=str(raw_latent_root),
         output_dim=output_dim,
     )
-    model_architecture = str(data["model_architecture"]).strip()
-    if not model_architecture:
-        raise ValueError(
-            "model_architecture must be set in the YAML config or provided via overrides."
-        )
-
     return EEGEncoderConfig(
         dataset_root=str(data["dataset_root"]),
         latent_root=latent_root,
@@ -222,7 +221,6 @@ def load_eeg_encoder_config(
         class_indices=(tuple(int(x) for x in class_indices) if class_indices is not None else None),
         eeg_normalization=eeg_normalization,
         eeg_zscore_eps=float(data["eeg_zscore_eps"]),
-        model_architecture=model_architecture,
         output_dim=output_dim,
         batch_size=int(data["batch_size"]),
         num_workers=int(data["num_workers"]),
@@ -370,8 +368,9 @@ def _save_artifacts(
     saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
     ckpt_path = output_dir / f"eeg_encoder_{saved_at}.pt"
     arch_metadata = extract_eeg_encoder_cnn_arch_metadata(model)
+    model_architecture_name = model.__class__.__name__
     config_payload = dict(config.__dict__)
-    config_payload["model_architecture"] = config.model_architecture
+    config_payload["model_architecture"] = model_architecture_name
     config_payload["model_architecture_params"] = arch_metadata
     if eeg_zscore_stats is not None:
         config_payload["eeg_zscore_mean"] = eeg_zscore_stats["mean"]
@@ -382,7 +381,7 @@ def _save_artifacts(
             "model_state_dict": model.state_dict(),
             "config": config_payload,
             "class_indices": list(config.class_indices) if config.class_indices is not None else None,
-            "model_architecture": config.model_architecture,
+            "model_architecture": model_architecture_name,
             "model_architecture_params": arch_metadata,
             "eeg_zscore_stats": eeg_zscore_stats,
             "saved_at": saved_at,
@@ -489,6 +488,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         print("Class indices: all classes")
     else:
         print(f"Class indices: {len(config.class_indices)} classes")
+    print(f"Latent root: {config.latent_root}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Train-eval samples: {len(train_eval_loader.dataset)}")
     print(f"Valid samples: {len(valid_loader.dataset)}")
