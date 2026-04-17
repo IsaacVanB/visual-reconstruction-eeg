@@ -1,7 +1,7 @@
 # Data
 dataset_root: datasets
 # Directory containing image latents (PCA targets) for EEG training.
-image_latent_root: latents/img_pca_64_b
+image_latent_root: latents/img_pca_64_all
 subject: sub-1
 split_seed: 0
 
@@ -24,9 +24,16 @@ eval_max_samples: 16
 eeg_normalization: zscore
 eeg_zscore_eps: 1.0e-6
 
+# EEG repeat averaging:
+# - all: average all repeats per stimulus
+# - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
+averaging_mode: all
+# Required when averaging_mode: random_k
+# k_repeats: 2
+
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]
 # - all: use every class available in the dataset
-class_subset: default100
+class_subset: all
 # Optional explicit override (takes precedence over class_subset when provided):
 # class_indices: [0, 1, 2, 3]

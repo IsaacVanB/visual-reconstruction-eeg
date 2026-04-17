@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import warnings
 
+import numpy as np
 import torch
 
 # Some dependency stacks call `torch.xpu.is_available()` unconditionally.
@@ -32,6 +33,7 @@ warnings.filterwarnings(
 )
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
+SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
 
 
 def parse_args():
@@ -64,11 +66,23 @@ def parse_args():
         help="Seed for deterministic train/valid/test image split within each class.",
     )
     parser.add_argument(
+        "--class-subset",
+        choices=["default100", "all"],
+        default="default100",
+        help=(
+            "Class subset preset. 'default100' uses [0,2,4,...,198]. "
+            "'all' uses every class available in dataset metadata."
+        ),
+    )
+    parser.add_argument(
         "--class-indices",
         type=int,
         nargs="+",
-        default=DEFAULT_CLASS_INDICES,
-        help="Optional list of class ids to process (e.g. --class-indices 0 1 2).",
+        default=None,
+        help=(
+            "Optional explicit class ids to process (e.g. --class-indices 0 1 2). "
+            "When set, this overrides --class-subset."
+        ),
     )
     parser.add_argument(
         "--full-dir-name",
@@ -125,6 +139,30 @@ def parse_args():
         default=1e-6,
         help="Minimum std when standardizing PCA outputs to avoid divide-by-zero.",
     )
+    parser.add_argument(
+        "--pca-solver",
+        choices=["full_svd", "lowrank"],
+        default="full_svd",
+        help=(
+            "PCA solver. 'full_svd' matches prior exact behavior; "
+            "'lowrank' uses torch.pca_lowrank for faster approximate PCA."
+        ),
+    )
+    parser.add_argument(
+        "--pca-lowrank-q",
+        type=int,
+        default=None,
+        help=(
+            "Optional rank parameter q for lowrank PCA. Must be >= n_components. "
+            "When omitted, a heuristic q is used."
+        ),
+    )
+    parser.add_argument(
+        "--pca-lowrank-niter",
+        type=int,
+        default=2,
+        help="Number of subspace iterations for lowrank PCA.",
+    )
     return parser.parse_args()
 
 
@@ -162,6 +200,35 @@ def _build_split_info(
     resolved_class_indices = [int(x) for x in train_dataset.class_indices.tolist()]
     images_per_class = int(train_dataset.images_per_class)
     return train_ids, valid_ids, resolved_class_indices, images_per_class
+
+
+def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
+    if args.class_indices is not None:
+        return [int(x) for x in args.class_indices]
+
+    class_subset = str(args.class_subset).lower()
+    if class_subset not in SUPPORTED_CLASS_SUBSETS:
+        raise ValueError(
+            f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
+        )
+    if class_subset == "default100":
+        return DEFAULT_CLASS_INDICES
+
+    metadata_path = dataset_root / "THINGS_EEG_2" / "image_metadata.npy"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Image metadata not found: {metadata_path}")
+    metadata = np.load(metadata_path, allow_pickle=True).item()
+    if "train_img_files" not in metadata:
+        raise KeyError("Expected key 'train_img_files' in image metadata.")
+    num_images = int(len(metadata["train_img_files"]))
+    images_per_class = 10
+    if num_images % images_per_class != 0:
+        raise ValueError(
+            "Number of images must be divisible by images_per_class; "
+            f"got {num_images} and {images_per_class}."
+        )
+    num_classes = num_images // images_per_class
+    return list(range(num_classes))
 
 
 def _extract_full_latents(
@@ -279,10 +346,16 @@ def _run_pca(
     else:
         fit_paths = train_paths + valid_paths
 
+    print(
+        f"Preparing PCA fit matrix from {len(fit_paths)} latents "
+        f"(scope='{args.pca_scope}', solver='{args.pca_solver}')..."
+    )
     flat_rows = []
-    for path in fit_paths:
+    for idx, path in enumerate(fit_paths, start=1):
         z = _load_pt_tensor(path).to(dtype=torch.float32, device="cpu")
         flat_rows.append(z.reshape(-1))
+        if idx % 1000 == 0 or idx == len(fit_paths):
+            print(f"[{idx}/{len(fit_paths)}] loaded fit latents")
     x_fit = torch.stack(flat_rows, dim=0)  # [N_fit, D]
 
     n_fit_samples, n_features = x_fit.shape
@@ -298,8 +371,35 @@ def _run_pca(
 
     mean = x_fit.mean(dim=0, keepdim=True)
     x_centered = x_fit - mean
-    _, s, v_t = torch.linalg.svd(x_centered, full_matrices=False)
-    components = v_t[:k]  # [k, D]
+    pca_lowrank_q_effective = None
+    if args.pca_solver == "full_svd":
+        print("Fitting PCA with full SVD on centered matrix...")
+        _, s, v_t = torch.linalg.svd(x_centered, full_matrices=False)
+        components = v_t[:k]  # [k, D]
+    else:
+        if args.pca_lowrank_niter < 0:
+            raise ValueError(f"pca_lowrank_niter must be >= 0, got {args.pca_lowrank_niter}")
+        max_q = min(n_fit_samples, n_features)
+        if args.pca_lowrank_q is None:
+            q = min(max(k + 8, 2 * k), max_q)
+        else:
+            q = int(args.pca_lowrank_q)
+        if q < k:
+            raise ValueError(
+                f"pca_lowrank_q must be >= n_components ({k}) when using lowrank solver; got {q}"
+            )
+        if q > max_q:
+            print(f"Adjusting pca_lowrank_q from {q} to {max_q} (max feasible).")
+            q = max_q
+        pca_lowrank_q_effective = int(q)
+        print(f"Fitting PCA with lowrank solver (q={q}, niter={args.pca_lowrank_niter})...")
+        _, s, v = torch.pca_lowrank(
+            x_centered,
+            q=q,
+            center=False,
+            niter=int(args.pca_lowrank_niter),
+        )
+        components = v[:, :k].T  # [k, D]
     explained_variance = (s[:k] ** 2) / max(n_fit_samples - 1, 1)
 
     def _to_pca(path: Path) -> torch.Tensor:
@@ -320,7 +420,7 @@ def _run_pca(
         )  # [1, k]
 
     out_dtype = torch.float16 if args.pca_save_dtype == "float16" else torch.float32
-    for path in train_paths:
+    for idx, path in enumerate(train_paths, start=1):
         z_pca = _to_pca(path)
         if args.standardize_pca:
             if pca_train_mean is None or pca_train_std is None:
@@ -328,8 +428,10 @@ def _run_pca(
             z_pca = (z_pca - pca_train_mean) / pca_train_std
         out_path = pca_dir / path.name
         torch.save(z_pca[0].to(out_dtype), out_path)
+        if idx % 1000 == 0 or idx == len(train_paths):
+            print(f"[{idx}/{len(train_paths)}] saved train PCA latents")
 
-    for path in valid_paths:
+    for idx, path in enumerate(valid_paths, start=1):
         z_pca = _to_pca(path)
         if args.standardize_pca:
             if pca_train_mean is None or pca_train_std is None:
@@ -337,6 +439,8 @@ def _run_pca(
             z_pca = (z_pca - pca_train_mean) / pca_train_std
         out_path = pca_dir / path.name
         torch.save(z_pca[0].to(out_dtype), out_path)
+        if idx % 1000 == 0 or idx == len(valid_paths):
+            print(f"[{idx}/{len(valid_paths)}] saved valid PCA latents")
 
     pca_params_path = (
         Path(args.pca_params_path)
@@ -363,6 +467,10 @@ def _run_pca(
         "pca_embedding_dir": str(pca_dir),
         "n_components": int(k),
         "n_features": int(n_features),
+        "pca_solver": str(args.pca_solver),
+        "pca_lowrank_q": int(args.pca_lowrank_q) if args.pca_lowrank_q is not None else None,
+        "pca_lowrank_q_effective": pca_lowrank_q_effective,
+        "pca_lowrank_niter": int(args.pca_lowrank_niter),
         "pca_scope": str(args.pca_scope),
         "fit_num_samples_pca_basis": int(n_fit_samples),
         "fit_num_samples_train": int(len(train_paths)),
@@ -415,9 +523,10 @@ def main():
         output_root = repo_root / output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
+    requested_class_indices = _resolve_class_indices(dataset_root=dataset_root, args=args)
     train_ids, valid_ids, class_indices, images_per_class = _build_split_info(
         dataset_root=dataset_root,
-        class_indices=args.class_indices,
+        class_indices=requested_class_indices,
         split_seed=args.split_seed,
     )
     split_image_ids = {

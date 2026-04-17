@@ -11,13 +11,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import yaml
 
-from src.data import EEGImageLatentDataset, build_eeg_transform
+from src.data import EEGImageLatentAveragedDataset, EEGImageLatentDataset, build_eeg_transform
 from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
 
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
 SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
 SUPPORTED_EEG_NORMALIZATION = {"l2", "zscore", "none"}
+SUPPORTED_AVERAGING_MODES = {"all", "random_k"}
 REQUIRED_CONFIG_KEYS = (
     "dataset_root",
     "subject",
@@ -33,6 +34,7 @@ REQUIRED_CONFIG_KEYS = (
     "output_dir",
     "eeg_normalization",
     "eeg_zscore_eps",
+    "averaging_mode",
 )
 
 
@@ -130,6 +132,8 @@ class EEGEncoderConfig:
     eeg_normalization: str  # one of: l2, zscore, none
     eeg_zscore_eps: float
     eeg_l2_normalize: bool
+    averaging_mode: str  # one of: all, random_k
+    k_repeats: Optional[int]
     pin_memory: bool
 
     # Evaluation default:
@@ -203,6 +207,19 @@ def load_eeg_encoder_config(
                 f"but eeg_l2_normalize={legacy_l2_flag}. "
                 "Use eeg_normalization only."
             )
+    averaging_mode = str(data["averaging_mode"]).lower()
+    if averaging_mode not in SUPPORTED_AVERAGING_MODES:
+        raise ValueError(
+            f"averaging_mode must be one of {sorted(SUPPORTED_AVERAGING_MODES)}, "
+            f"got: {averaging_mode}"
+        )
+    k_repeats = data.get("k_repeats", None)
+    if k_repeats is not None:
+        k_repeats = int(k_repeats)
+    if averaging_mode == "random_k" and k_repeats is None:
+        raise ValueError("k_repeats must be set when averaging_mode='random_k'.")
+    if k_repeats is not None and k_repeats < 1:
+        raise ValueError(f"k_repeats must be >= 1 when set, got: {k_repeats}")
 
     output_dim = int(data["output_dim"])
     raw_latent_root = data.get("image_latent_root", data.get("latent_root"))
@@ -221,6 +238,8 @@ def load_eeg_encoder_config(
         class_indices=(tuple(int(x) for x in class_indices) if class_indices is not None else None),
         eeg_normalization=eeg_normalization,
         eeg_zscore_eps=float(data["eeg_zscore_eps"]),
+        averaging_mode=averaging_mode,
+        k_repeats=k_repeats,
         output_dim=output_dim,
         batch_size=int(data["batch_size"]),
         num_workers=int(data["num_workers"]),
@@ -273,7 +292,7 @@ def _make_loader_with_stats(
             normalize_mode=normalize_mode,
             to_tensor=True,
         )
-    dataset = EEGImageLatentDataset(
+    dataset = EEGImageLatentAveragedDataset(
         dataset_root=config.dataset_root,
         latent_root=config.latent_root,
         subject=config.subject,
@@ -281,6 +300,8 @@ def _make_loader_with_stats(
         class_indices=config.class_indices,
         transform=eeg_transform,
         split_seed=config.split_seed,
+        averaging_mode=config.averaging_mode,
+        k_repeats=config.k_repeats,
     )
     return DataLoader(
         dataset,
@@ -489,6 +510,8 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     else:
         print(f"Class indices: {len(config.class_indices)} classes")
     print(f"Latent root: {config.latent_root}")
+    print(f"Averaging mode: {config.averaging_mode}")
+    print(f"k_repeats: {config.k_repeats}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Train-eval samples: {len(train_eval_loader.dataset)}")
     print(f"Valid samples: {len(valid_loader.dataset)}")

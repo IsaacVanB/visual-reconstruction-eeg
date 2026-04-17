@@ -246,6 +246,159 @@ class EEGImageLatentDataset(EEGImageDataset):
         return eeg_sample, image_latent, label
 
 
+class _EEGAveragingMixin:
+    def _init_averaging(
+        self,
+        averaging_mode: str = "all",
+        k_repeats: Optional[int] = None,
+    ) -> None:
+        self.averaging_mode = averaging_mode
+        self.k_repeats = k_repeats
+        self._avg_sample_index = [int(image_idx) for image_idx in self._split_image_indices]
+
+        if self.averaging_mode not in {"all", "random_k"}:
+            raise ValueError("averaging_mode must be one of: 'all', 'random_k'.")
+
+        if self.averaging_mode == "random_k":
+            if self.k_repeats is None:
+                raise ValueError("k_repeats must be set when averaging_mode='random_k'.")
+            if self.k_repeats < 1 or self.k_repeats > self.repetitions:
+                raise ValueError(
+                    f"k_repeats must be in [1, {self.repetitions}] for this subject; "
+                    f"got {self.k_repeats}."
+                )
+
+    def _average_repeats(self, image_index: int):
+        if self.split in {"valid", "test"} or self.averaging_mode == "all":
+            return self.eeg[image_index].mean(axis=0)
+
+        selected = torch.randperm(self.repetitions)[: self.k_repeats].cpu().numpy()
+        return self.eeg[image_index, selected].mean(axis=0)
+
+    def __len__(self) -> int:
+        return len(self._avg_sample_index)
+
+
+class EEGImageAveragedDataset(_EEGAveragingMixin, EEGImageDataset):
+    def __init__(
+        self,
+        dataset_root: str,
+        subject: str = "sub-1",
+        split: str = "train",
+        class_indices: Optional[Sequence[int]] = None,
+        transform=None,
+        target_transform=None,
+        mmap_mode: Optional[str] = "r",
+        image_transform=None,
+        return_image_name: bool = False,
+        split_seed: int = 0,
+        averaging_mode: str = "all",
+        k_repeats: Optional[int] = None,
+    ) -> None:
+        super().__init__(
+            dataset_root=dataset_root,
+            subject=subject,
+            split=split,
+            class_indices=class_indices,
+            transform=transform,
+            target_transform=target_transform,
+            mmap_mode=mmap_mode,
+            image_transform=image_transform,
+            return_image_name=return_image_name,
+            split_seed=split_seed,
+        )
+        self._init_averaging(averaging_mode=averaging_mode, k_repeats=k_repeats)
+
+    def __getitem__(self, idx: int):
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index out of range: {idx}")
+
+        image_index = self._avg_sample_index[idx]
+        eeg_sample = self._average_repeats(image_index)
+        label = image_index // self.images_per_class
+
+        if self.transform:
+            eeg_sample = self.transform(eeg_sample)
+        if self.target_transform:
+            label = self.target_transform(label)
+
+        image_name = self.train_img_files[image_index]
+        if "/" in image_name or os.path.sep in image_name:
+            rel_path = image_name
+        else:
+            class_name = image_name.rsplit("_", 1)[0]
+            rel_path = os.path.join(class_name, image_name)
+
+        image_path = os.path.join(self.image_root, rel_path)
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+
+        with Image.open(image_path) as pil_image:
+            image = pil_image.convert("RGB")
+
+        if self.image_transform:
+            image = self.image_transform(image)
+
+        if self.return_image_name:
+            return eeg_sample, image, label, image_name
+
+        return eeg_sample, image, label
+
+
+class EEGImageLatentAveragedDataset(_EEGAveragingMixin, EEGImageLatentDataset):
+    def __init__(
+        self,
+        dataset_root: str,
+        subject: str = "sub-1",
+        split: str = "train",
+        class_indices: Optional[Sequence[int]] = None,
+        transform=None,
+        target_transform=None,
+        mmap_mode: Optional[str] = "r",
+        latent_root: str = os.path.join("latents", "img"),
+        latent_transform=None,
+        split_seed: int = 0,
+        averaging_mode: str = "all",
+        k_repeats: Optional[int] = None,
+    ) -> None:
+        super().__init__(
+            dataset_root=dataset_root,
+            subject=subject,
+            split=split,
+            class_indices=class_indices,
+            transform=transform,
+            target_transform=target_transform,
+            mmap_mode=mmap_mode,
+            latent_root=latent_root,
+            latent_transform=latent_transform,
+            split_seed=split_seed,
+        )
+        self._init_averaging(averaging_mode=averaging_mode, k_repeats=k_repeats)
+
+    def __getitem__(self, idx: int):
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index out of range: {idx}")
+
+        image_index = self._avg_sample_index[idx]
+        eeg_sample = self._average_repeats(image_index)
+        label = image_index // self.images_per_class
+
+        if self.transform:
+            eeg_sample = self.transform(eeg_sample)
+        if self.target_transform:
+            label = self.target_transform(label)
+
+        latent_path = self._resolve_latent_path(int(image_index))
+        try:
+            image_latent = torch.load(latent_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            image_latent = torch.load(latent_path, map_location="cpu")
+        if self.latent_transform:
+            image_latent = self.latent_transform(image_latent)
+
+        return eeg_sample, image_latent, label
+
+
 class ImageDataset(Dataset):
     def __init__(
         self,
