@@ -2,50 +2,31 @@ import argparse
 import json
 import sys
 from pathlib import Path
-import warnings
+from typing import Any
 
 import numpy as np
 import torch
-
-# Some dependency stacks call `torch.xpu.is_available()` unconditionally.
-# Older/macOS PyTorch builds may not expose `torch.xpu`, so provide a safe shim.
-if not hasattr(torch, "xpu"):
-    class _TorchXPUNull:
-        @staticmethod
-        def is_available() -> bool:
-            return False
-
-    torch.xpu = _TorchXPUNull()  # type: ignore[attr-defined]
-
-from diffusers import AutoencoderKL
+from omegaconf import OmegaConf
+from torchvision.transforms import v2
 
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
-from src.data import ImageDataset, build_image_transform
+from src.data import ImageDataset
 
-# Silence known huggingface_hub deprecation emitted by some model download paths.
-warnings.filterwarnings(
-    "ignore",
-    message=".*local_dir_use_symlinks.*deprecated and ignored.*",
-    category=UserWarning,
-    module="huggingface_hub.utils._validators",
-)
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
 SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Extract SD-VAE latents and optionally convert them to PCA embeddings."
+        description="Extract DINO-SAE latents and optionally convert them to PCA embeddings."
     )
     parser.add_argument("--dataset-root", default="datasets", help="Dataset root directory.")
-    parser.add_argument(
-        "--output-root",
-        default="latents",
-        help="Root output directory.",
-    )
+    parser.add_argument("--output-root", default="latents", help="Root output directory.")
     parser.add_argument(
         "--embedding-type",
         choices=["full", "pca", "both"],
@@ -53,11 +34,39 @@ def parse_args():
         help="What to produce: full latents, PCA latents, or both.",
     )
     parser.add_argument(
-        "--vae-name",
-        default="stabilityai/sd-vae-ft-mse",
-        help="Diffusers VAE model id.",
+        "--full-dir-name",
+        default="img_dino_full",
+        help="Subdirectory under output-root for extracted DINO latent_grid tensors.",
     )
-    parser.add_argument("--image-size", type=int, default=512, help="Square resize size.")
+    parser.add_argument(
+        "--pca-dir-name",
+        default="img_dino_pca",
+        help="Subdirectory under output-root for PCA latents.",
+    )
+    parser.add_argument(
+        "--dino-repo-root",
+        default="dino-sae",
+        help="Path to DINO-SAE repo root (must contain src/model.py).",
+    )
+    parser.add_argument(
+        "--sae-checkpoint",
+        default="dino-sae/ema_model_step_470000.pt",
+        help="Path to DINO-SAE checkpoint.",
+    )
+    parser.add_argument(
+        "--dino-weights-path",
+        default=None,
+        help=(
+            "Optional DINOv3 weight path. "
+            "Default: <dino-repo-root>/src/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+        ),
+    )
+    parser.add_argument(
+        "--dino-model-name",
+        default="dinov3_vitl16",
+        help="Model name passed into DINOSphericalAutoencoder dino_cfg.",
+    )
+    parser.add_argument("--image-size", type=int, default=256, help="Square resize size.")
     parser.add_argument("--device", default=None, help="cuda, cpu, etc.")
     parser.add_argument(
         "--split-seed",
@@ -85,14 +94,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--full-dir-name",
-        default="img_full",
-        help="Subdirectory under output-root for full latents.",
-    )
-    parser.add_argument(
-        "--pca-dir-name",
-        default="img_pca",
-        help="Subdirectory under output-root for PCA latents.",
+        "--latent-save-dtype",
+        default="float16",
+        choices=["float16", "float32"],
+        help="Dtype for saved latent_grid tensors.",
     )
     parser.add_argument(
         "--n-components",
@@ -166,42 +171,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _load_pt_tensor(path: Path) -> torch.Tensor:
-    try:
-        tensor = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        tensor = torch.load(path, map_location="cpu")
-    if not isinstance(tensor, torch.Tensor):
-        raise TypeError(f"Expected tensor in {path}, got {type(tensor)}")
-    return tensor
-
-
-def _build_split_info(
-    dataset_root: Path,
-    class_indices,
-    split_seed: int,
-) -> tuple[list[int], list[int], list[int], int]:
-    train_dataset = ImageDataset(
-        dataset_root=str(dataset_root),
-        split="train",
-        class_indices=class_indices,
-        image_transform=None,
-        split_seed=split_seed,
-    )
-    valid_dataset = ImageDataset(
-        dataset_root=str(dataset_root),
-        split="valid",
-        class_indices=class_indices,
-        image_transform=None,
-        split_seed=split_seed,
-    )
-    train_ids = [int(x) for x in train_dataset._split_image_indices.tolist()]
-    valid_ids = [int(x) for x in valid_dataset._split_image_indices.tolist()]
-    resolved_class_indices = [int(x) for x in train_dataset.class_indices.tolist()]
-    images_per_class = int(train_dataset.images_per_class)
-    return train_ids, valid_ids, resolved_class_indices, images_per_class
-
-
 def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
     if args.class_indices is not None:
         return [int(x) for x in args.class_indices]
@@ -231,6 +200,192 @@ def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
     return list(range(num_classes))
 
 
+def _build_split_info(
+    dataset_root: Path,
+    class_indices,
+    split_seed: int,
+) -> tuple[list[int], list[int], list[int], int]:
+    train_dataset = ImageDataset(
+        dataset_root=str(dataset_root),
+        split="train",
+        class_indices=class_indices,
+        image_transform=None,
+        split_seed=split_seed,
+    )
+    valid_dataset = ImageDataset(
+        dataset_root=str(dataset_root),
+        split="valid",
+        class_indices=class_indices,
+        image_transform=None,
+        split_seed=split_seed,
+    )
+    train_ids = [int(x) for x in train_dataset._split_image_indices.tolist()]
+    valid_ids = [int(x) for x in valid_dataset._split_image_indices.tolist()]
+    resolved_class_indices = [int(x) for x in train_dataset.class_indices.tolist()]
+    images_per_class = int(train_dataset.images_per_class)
+    return train_ids, valid_ids, resolved_class_indices, images_per_class
+
+
+def _make_input_transform(image_size: int):
+    return v2.Compose(
+        [
+            v2.ToImage(),
+            v2.Resize((image_size, image_size), antialias=True),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
+
+def _load_pt_tensor(path: Path) -> torch.Tensor:
+    try:
+        tensor = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        tensor = torch.load(path, map_location="cpu")
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"Expected tensor in {path}, got {type(tensor)}")
+    return tensor
+
+
+def _extract_state_dict(ckpt_obj: Any) -> dict[str, torch.Tensor]:
+    if isinstance(ckpt_obj, dict):
+        priority_keys = (
+            "state_dict",
+            "model",
+            "ema",
+            "ema_state_dict",
+            "model_state_dict",
+            "module",
+        )
+        for key in priority_keys:
+            value = ckpt_obj.get(key)
+            if isinstance(value, dict):
+                return value
+        if ckpt_obj and all(torch.is_tensor(v) for v in ckpt_obj.values()):
+            return ckpt_obj
+    raise ValueError("Could not find a usable state_dict in checkpoint.")
+
+
+def _try_load_sae_weights(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+) -> tuple[list[str], list[str]]:
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    raw_state = _extract_state_dict(ckpt)
+
+    candidate_prefixes = (
+        "",
+        "model.",
+        "module.",
+        "ema_model.",
+        "ema.",
+        "autoencoder.",
+        "net.",
+    )
+
+    last_missing: list[str] = []
+    last_unexpected: list[str] = []
+    for prefix in candidate_prefixes:
+        state: dict[str, torch.Tensor] = {}
+        for key, value in raw_state.items():
+            if prefix:
+                if key.startswith(prefix):
+                    state[key[len(prefix):]] = value
+            else:
+                state[key] = value
+        try:
+            missing, unexpected = model.load_state_dict(state, strict=False)
+        except RuntimeError:
+            continue
+
+        model_keys = set(model.state_dict().keys())
+        loaded_keys = set(state.keys())
+        overlap = len(model_keys & loaded_keys)
+        if overlap > 0:
+            return list(missing), list(unexpected)
+
+        last_missing = list(missing)
+        last_unexpected = list(unexpected)
+
+    return last_missing, last_unexpected
+
+
+def _build_dino_sae_model(
+    dino_repo_root: Path,
+    sae_checkpoint: Path,
+    dino_weights_path: Path,
+    dino_model_name: str,
+    device: torch.device,
+) -> tuple[torch.nn.Module, list[str], list[str]]:
+    src_dir = dino_repo_root / "src"
+    if not src_dir.exists():
+        raise FileNotFoundError(f"Could not find src/ under DINO repo root: {dino_repo_root}")
+    sys.path.insert(0, str(src_dir))
+
+    try:
+        from model import DINOSphericalAutoencoder, DecoderConfig
+    except ImportError as exc:
+        raise ImportError(
+            "Failed to import DINO-SAE model code from dino-repo-root/src. "
+            "Install DINO-SAE dependencies and verify path."
+        ) from exc
+
+    dino_cfg = OmegaConf.create(
+        {
+            "repo_path": str(src_dir / "dinov3"),
+            "model_name": str(dino_model_name),
+            "weights_path": str(dino_weights_path),
+        }
+    )
+    decoder_cfg = DecoderConfig(
+        in_channels=3,
+        latent_channels=1024,
+        in_shortcut="duplicating",
+        width_list=(256, 512, 512, 1024, 1024),
+        depth_list=(5, 5, 3, 3, 3),
+        block_type=["ResBlock", "ResBlock", "ResBlock", "EViT_GLU", "EViT_GLU"],
+        norm="trms2d",
+        act="silu",
+        upsample_block_type="InterpolateConv",
+        upsample_match_channel=True,
+        upsample_shortcut="duplicating",
+        out_norm="trms2d",
+        out_act="relu",
+    )
+    model = DINOSphericalAutoencoder(
+        dino_cfg=dino_cfg,
+        decoder_cfg=decoder_cfg,
+        train_cnn_embedder=False,
+    )
+
+    missing, unexpected = _try_load_sae_weights(model=model, checkpoint_path=sae_checkpoint)
+    model.to(device)
+    model.eval()
+    return model, missing, unexpected
+
+
+@torch.inference_mode()
+def _encode_to_latent_grid(
+    model: torch.nn.Module,
+    image_tensor_bchw: torch.Tensor,
+) -> torch.Tensor:
+    encoded = model.encode(image_tensor_bchw)
+    if "patch_tokens" not in encoded:
+        raise KeyError("DINO-SAE encode() output missing key 'patch_tokens'.")
+    patch_tokens = encoded["patch_tokens"]
+    if patch_tokens.ndim != 3:
+        raise ValueError(f"Expected patch_tokens [B, N, C], got {tuple(patch_tokens.shape)}")
+
+    b, num_patches, channels = patch_tokens.shape
+    side = int(num_patches ** 0.5)
+    if side * side != num_patches:
+        raise ValueError(
+            f"Patch token count {num_patches} is not a perfect square; cannot reshape to grid."
+        )
+    latent_grid = patch_tokens.permute(0, 2, 1).contiguous().reshape(b, channels, side, side)
+    return latent_grid
+
+
 def _extract_full_latents(
     args,
     dataset_root: Path,
@@ -242,19 +397,42 @@ def _extract_full_latents(
     latents_full_dir = output_root / args.full_dir_name
     latents_full_dir.mkdir(parents=True, exist_ok=True)
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    vae = AutoencoderKL.from_pretrained(args.vae_name).to(device).eval()
-    preprocess = build_image_transform(
-        image_size=(args.image_size, args.image_size),
-        mean=(0.5, 0.5, 0.5),
-        std=(0.5, 0.5, 0.5),
+    dino_repo_root = Path(args.dino_repo_root)
+    if not dino_repo_root.is_absolute():
+        dino_repo_root = repo_root / dino_repo_root
+    sae_checkpoint = Path(args.sae_checkpoint)
+    if not sae_checkpoint.is_absolute():
+        sae_checkpoint = repo_root / sae_checkpoint
+    if args.dino_weights_path is None:
+        dino_weights_path = dino_repo_root / "src" / "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    else:
+        dino_weights_path = Path(args.dino_weights_path)
+        if not dino_weights_path.is_absolute():
+            dino_weights_path = repo_root / dino_weights_path
+
+    if not dino_repo_root.exists():
+        raise FileNotFoundError(f"dino-repo-root not found: {dino_repo_root}")
+    if not sae_checkpoint.exists():
+        raise FileNotFoundError(f"sae-checkpoint not found: {sae_checkpoint}")
+    if not dino_weights_path.exists():
+        raise FileNotFoundError(f"dino-weights-path not found: {dino_weights_path}")
+
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model, missing_keys, unexpected_keys = _build_dino_sae_model(
+        dino_repo_root=dino_repo_root,
+        sae_checkpoint=sae_checkpoint,
+        dino_weights_path=dino_weights_path,
+        dino_model_name=args.dino_model_name,
+        device=device,
     )
+    image_tf = _make_input_transform(image_size=args.image_size)
+    save_dtype = torch.float16 if args.latent_save_dtype == "float16" else torch.float32
 
     train_dataset = ImageDataset(
         dataset_root=str(dataset_root),
         split="train",
         class_indices=class_indices,
-        image_transform=preprocess,
+        image_transform=None,
         return_image_id=True,
         split_seed=args.split_seed,
     )
@@ -262,44 +440,48 @@ def _extract_full_latents(
         dataset_root=str(dataset_root),
         split="valid",
         class_indices=class_indices,
-        image_transform=preprocess,
+        image_transform=None,
         return_image_id=True,
         split_seed=args.split_seed,
     )
 
     total = int(len(train_dataset) + len(valid_dataset))
     print(
-        "Extracting full latents for "
+        "Extracting DINO latent_grid tensors for "
         f"{total} unique stimulus images across {len(class_indices)} classes..."
     )
 
     step = 0
-    with torch.no_grad():
-        for dataset in (train_dataset, valid_dataset):
-            for idx in range(len(dataset)):
-                image_tensor, _label, image_id = dataset[idx]
-                x = image_tensor.unsqueeze(0).to(device=device, dtype=torch.float32)  # [1,3,H,W] in [-1,1]
-                posterior = vae.encode(x).latent_dist
-                z = posterior.mean[0].to(dtype=torch.float16).cpu()
-                out_file = latents_full_dir / f"{int(image_id):06d}.pt"
-                torch.save(z, out_file)
-                step += 1
-                if step % 100 == 0 or step == total:
-                    print(f"[{step}/{total}] saved: {out_file.name}")
+    last_latent_shape = None
+    for dataset in (train_dataset, valid_dataset):
+        for idx in range(len(dataset)):
+            image_pil, _label, image_id = dataset[idx]
+            x = image_tf(image_pil).unsqueeze(0).to(device=device, dtype=torch.float32)
+            latent_grid = _encode_to_latent_grid(model=model, image_tensor_bchw=x)[0]
+            latent_grid = latent_grid.to(dtype=save_dtype).cpu()
+            out_file = latents_full_dir / f"{int(image_id):06d}.pt"
+            torch.save(latent_grid, out_file)
+            last_latent_shape = list(latent_grid.shape)
+
+            step += 1
+            if step % 100 == 0 or step == total:
+                print(f"[{step}/{total}] saved: {out_file.name}")
 
     metadata = {
-        "model_id": args.vae_name,
-        "scaling_factor": float(vae.config.scaling_factor),
+        "encoder_type": "dino_sae",
+        "dino_repo_root": str(dino_repo_root.resolve()),
+        "sae_checkpoint": str(sae_checkpoint.resolve()),
+        "dino_model_name": str(args.dino_model_name),
+        "dino_weights_path": str(dino_weights_path.resolve()),
         "preprocessing": {
             "resize": [args.image_size, args.image_size],
             "to_tensor_range": [0.0, 1.0],
-            "normalize_mean": [0.5, 0.5, 0.5],
-            "normalize_std": [0.5, 0.5, 0.5],
-            "normalized_range": [-1.0, 1.0],
+            "normalize_mean": list(IMAGENET_MEAN),
+            "normalize_std": list(IMAGENET_STD),
         },
-        "latent_definition": "z = vae.encode(x).latent_dist.mean",
-        "latent_dtype": "float16",
-        "latent_tensor_shape": [4, args.image_size // 8, args.image_size // 8],
+        "latent_definition": "latent_grid = reshape(encode(x)['patch_tokens'])",
+        "latent_dtype": str(args.latent_save_dtype),
+        "latent_tensor_shape": last_latent_shape,
         "filename_convention": f"latents/{args.full_dir_name}" + "/{image_id:06d}.pt",
         "images_per_class": images_per_class,
         "class_indices": class_indices,
@@ -310,10 +492,14 @@ def _extract_full_latents(
             "valid": int(len(split_image_ids["valid"])),
             "test": int(len(split_image_ids["test"])),
         },
+        "checkpoint_load_missing_keys": int(len(missing_keys)),
+        "checkpoint_load_unexpected_keys": int(len(unexpected_keys)),
     }
     metadata_path = output_root / f"{args.full_dir_name}_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2))
     print(f"Saved metadata to: {metadata_path}")
+    print(f"Missing keys when loading SAE checkpoint: {len(missing_keys)}")
+    print(f"Unexpected keys when loading SAE checkpoint: {len(unexpected_keys)}")
     return latents_full_dir
 
 
@@ -407,12 +593,10 @@ def _run_pca(
         z_flat = z.reshape(-1).unsqueeze(0)  # [1, D]
         return (z_flat - mean) @ components.T  # [1, k]
 
-    # Optional z-score standardization in PCA space using selected fit scope.
     pca_train_mean = None
     pca_train_std = None
     if args.standardize_pca:
-        stat_paths = fit_paths
-        stat_rows = [_to_pca(path) for path in stat_paths]
+        stat_rows = [_to_pca(path) for path in fit_paths]
         x_pca_stats = torch.cat(stat_rows, dim=0)  # [N_stats, k]
         pca_train_mean = x_pca_stats.mean(dim=0, keepdim=True)  # [1, k]
         pca_train_std = x_pca_stats.std(dim=0, unbiased=False, keepdim=True).clamp_min(
@@ -442,11 +626,7 @@ def _run_pca(
         if idx % 1000 == 0 or idx == len(valid_paths):
             print(f"[{idx}/{len(valid_paths)}] saved valid PCA latents")
 
-    pca_params_path = (
-        Path(args.pca_params_path)
-        if args.pca_params_path
-        else pca_dir / f"pca_{k}.pt"
-    )
+    pca_params_path = Path(args.pca_params_path) if args.pca_params_path else pca_dir / f"pca_{k}.pt"
     pca_payload = {
         "pca_mean": mean[0].to(torch.float32),
         "pca_components": components.to(torch.float32),

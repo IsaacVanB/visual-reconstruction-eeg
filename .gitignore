@@ -5,3 +5,4 @@ latents/
 obsolete/
 scripts/copy_jack_folders.py
 .codex
+dino-sae/

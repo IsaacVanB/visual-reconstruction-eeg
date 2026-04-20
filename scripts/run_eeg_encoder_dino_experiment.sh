@@ -3,55 +3,37 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run one EEG encoder experiment:
+Run one DINO EEG encoder experiment:
 1) Train EEG encoder into a timestamped run directory.
-2) Run eval_eeg_encoder.py using the produced checkpoint.
-3) Run eval_eeg_with_mean_baselines.py for model-vs-baseline metrics.
+2) Run eval_eeg_encoder_dino.py using the produced checkpoint.
+3) Run eval_eeg_with_mean_baselines_dino.py for model-vs-baseline metrics.
 
 Usage:
-  scripts/run_eeg_encoder_experiment.sh [runner options] [train args ...] [--eval eval args ...] [--baseline baseline args ...]
+  scripts/run_eeg_encoder_dino_experiment.sh [runner options] [train args ...] [--eval eval args ...] [--baseline baseline args ...]
 
 Runner options:
-  --output-base PATH   Base directory for runs (default: outputs/eeg_encoder)
+  --output-base PATH   Base directory for runs (default: outputs/eeg_encoder_dino)
   --run-name NAME      Explicit run directory name (default: run_YYYYMMDD_HHMMSS)
   --checkpoint-path P  Skip training and resume evaluation from an existing checkpoint
   --skip-eval          Train only; skip evaluation step
-  --skip-baseline      Skip eval_eeg_with_mean_baselines.py step
+  --skip-baseline      Skip eval_eeg_with_mean_baselines_dino.py step
   --help               Show this help
 
 Argument forwarding:
-  - Any args before '--eval' are passed to scripts/train_eeg_encoder.py
-  - Any args between '--eval' and '--baseline' are passed to src/evaluation/eval_eeg_encoder.py
-  - Any args after '--baseline' are passed to src/evaluation/eval_eeg_with_mean_baselines.py
-
-Examples:
-  scripts/run_eeg_encoder_experiment.sh
-
-  scripts/run_eeg_encoder_experiment.sh \
-    --config configs/eeg_encoder.yaml \
-    --epochs 40 \
-    --batch-size 32 \
-    --eval --max-samples 16 --grid-images 8
-
-  scripts/run_eeg_encoder_experiment.sh \
-    --run-name ablation_k3_7 \
-    --temporal-kernel3 7 \
-    --eval --device cpu
-
-  scripts/run_eeg_encoder_experiment.sh \
-    --eval --max-samples 16 --grid-images 8 \
-    --baseline --image-size 512 --batch-size 4
+  - Any args before '--eval' are passed to scripts/train_eeg_encoder_dino.py
+  - Any args between '--eval' and '--baseline' are passed to src/evaluation/eval_eeg_encoder_dino.py
+  - Any args after '--baseline' are passed to src/evaluation/eval_eeg_with_mean_baselines_dino.py
 EOF
 }
 
-OUTPUT_BASE="outputs/eeg_encoder"
+OUTPUT_BASE="outputs/eeg_encoder_dino"
 RUN_NAME=""
 SKIP_EVAL=0
 SKIP_BASELINE=0
 CHECKPOINT_PATH=""
-TRAIN_SCRIPT="scripts/train_eeg_encoder.py"
-EVAL_SCRIPT="src/evaluation/eval_eeg_encoder.py"
-BASELINE_EVAL_SCRIPT="src/evaluation/eval_eeg_with_mean_baselines.py"
+TRAIN_SCRIPT="scripts/train_eeg_encoder_dino.py"
+EVAL_SCRIPT="src/evaluation/eval_eeg_encoder_dino.py"
+BASELINE_EVAL_SCRIPT="src/evaluation/eval_eeg_with_mean_baselines_dino.py"
 
 train_args=()
 eval_args=()
@@ -140,7 +122,6 @@ else
     run_python "$TRAIN_SCRIPT" --output-dir "$RUN_DIR"
   fi
 
-  # train_eeg_encoder.py now saves timestamped checkpoints. Pick the newest one in this run dir.
   checkpoint_path="$(ls -1t "$RUN_DIR"/eeg_encoder_*.pt 2>/dev/null | head -n 1 || true)"
   if [[ -z "$checkpoint_path" ]]; then
     checkpoint_path="$(ls -1t "$RUN_DIR"/eeg_encoder.pt 2>/dev/null | head -n 1 || true)"
@@ -154,24 +135,25 @@ fi
 
 if [[ "$SKIP_EVAL" -eq 1 ]]; then
   printf 'Skipping evaluation (--skip-eval).\n'
-else
-  EVAL_DIR="$RUN_DIR/eval"
-  mkdir -p "$EVAL_DIR"
-  printf 'Starting evaluation...\n'
-  if [[ "${#eval_args[@]}" -gt 0 ]]; then
-    run_python "$EVAL_SCRIPT" \
-      --checkpoint-path "$checkpoint_path" \
-      --output-dir "$EVAL_DIR" \
-      "${eval_args[@]}"
-  else
-    run_python "$EVAL_SCRIPT" \
-      --checkpoint-path "$checkpoint_path" \
-      --output-dir "$EVAL_DIR"
-  fi
-
-  printf 'Evaluation complete.\n'
-  printf 'Expected grid: %s\n' "$EVAL_DIR/recon_grid.png"
+  exit 0
 fi
+
+EVAL_DIR="$RUN_DIR/eval"
+mkdir -p "$EVAL_DIR"
+printf 'Starting evaluation...\n'
+if [[ "${#eval_args[@]}" -gt 0 ]]; then
+  run_python "$EVAL_SCRIPT" \
+    --checkpoint-path "$checkpoint_path" \
+    --output-dir "$EVAL_DIR" \
+    "${eval_args[@]}"
+else
+  run_python "$EVAL_SCRIPT" \
+    --checkpoint-path "$checkpoint_path" \
+    --output-dir "$EVAL_DIR"
+fi
+
+printf 'Evaluation complete.\n'
+printf 'Expected grid: %s\n' "$EVAL_DIR/recon_grid.png"
 
 if [[ "$SKIP_BASELINE" -eq 1 ]]; then
   printf 'Skipping baseline comparison eval (--skip-baseline).\n'

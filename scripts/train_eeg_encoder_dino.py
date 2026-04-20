@@ -9,8 +9,8 @@ from src.training import load_eeg_encoder_config, train_eeg_encoder
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train EEG CNN encoder against PCA latents.")
-    parser.add_argument("--config", default="configs/eeg_encoder.yaml")
+    parser = argparse.ArgumentParser(description="Train EEG CNN encoder against DINO latent targets.")
+    parser.add_argument("--config", default="configs/eeg_encoder_dino.yaml")
     parser.add_argument("--dataset-root")
     parser.add_argument("--image-latent-root")
     parser.add_argument("--latent-root")

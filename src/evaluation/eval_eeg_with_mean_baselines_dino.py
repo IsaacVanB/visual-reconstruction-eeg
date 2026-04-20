@@ -6,8 +6,8 @@ import warnings
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import numpy as np
+from omegaconf import OmegaConf
 
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
@@ -16,18 +16,14 @@ from src.data import EEGImageLatentDataset, build_image_dataloader, build_image_
 from src.evaluation.eeg_eval_core import (
     build_eeg_transform_from_saved_cfg,
     build_model_for_checkpoint,
-    decode_from_pca_prediction,
     filter_image_indices_to_existing_files,
     filter_sample_index_to_existing_files,
     find_latest_run_dir,
+    inverse_pca_prediction,
     load_checkpoint,
-    load_autoencoder_kl_class,
     load_ground_truth_tensor,
-    load_metadata,
     load_pca_projection,
-    load_scaling_factor,
     resolve_checkpoint_for_run,
-    resolve_decode_latent_scaling_mode,
     resolve_eval_overrides,
     resolve_pca_params_path,
     resolve_torch_device,
@@ -57,7 +53,7 @@ warnings.filterwarnings(
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate EEG reconstructions against target images and compare with "
+            "Evaluate DINO-EEG reconstructions against target images and compare with "
             "global/class train mean-image baselines."
         )
     )
@@ -68,20 +64,37 @@ def parse_args():
     parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--class-indices", type=int, nargs="+", default=None)
     parser.add_argument("--pca-params-path", default=None)
-    parser.add_argument("--metadata-path", default="latents/img_full_metadata.json")
+    parser.add_argument("--latent-shape", type=int, nargs=3, default=[1024, 16, 16])
     parser.add_argument(
-        "--decode-latent-scaling",
-        default="auto",
-        choices=["auto", "divide", "none"],
+        "--dino-repo-root",
+        default="dino-sae",
+        help="Path to DINO-SAE repo root.",
+    )
+    parser.add_argument(
+        "--sae-checkpoint",
+        default="dino-sae/ema_model_step_470000.pt",
+        help="Path to DINO-SAE checkpoint.",
+    )
+    parser.add_argument(
+        "--dino-weights-path",
+        default=None,
         help=(
-            "How to adapt predicted VAE latents before decode. "
-            "'auto' infers from metadata; 'divide' uses z/scaling_factor; "
-            "'none' decodes z directly."
+            "Optional DINOv3 weight path. "
+            "Default: <dino-repo-root>/src/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
         ),
     )
-    parser.add_argument("--vae-name", default="stabilityai/sd-vae-ft-mse")
-    parser.add_argument("--latent-shape", type=int, nargs=3, default=[4, 64, 64])
-    parser.add_argument("--image-size", type=int, default=512)
+    parser.add_argument(
+        "--dino-model-name",
+        default="dinov3_vitl16",
+        help="Model name passed into DINOSphericalAutoencoder dino_cfg.",
+    )
+    parser.add_argument(
+        "--output-mode",
+        default="zero_one",
+        choices=["auto", "zero_one", "minus_one_one", "imagenet"],
+        help="How to map DINO decoder output to display range.",
+    )
+    parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-samples", type=int, default=None)
@@ -109,15 +122,15 @@ def _load_metrics_deps():
     return StructuralSimilarityIndexMeasure, lpips
 
 
-def compute_global_and_class_means(train_loader, device: torch.device):
+def compute_global_and_class_means(train_loader):
     total_count = 0
     global_sum = None
     class_sum: dict[int, torch.Tensor] = {}
     class_count: dict[int, int] = {}
 
     for images, labels in train_loader:
-        images_01 = images.to(device=device, dtype=torch.float32).clamp(0.0, 1.0)
-        labels = labels.to(device=device, dtype=torch.long)
+        images_01 = images.to(dtype=torch.float32).clamp(0.0, 1.0)
+        labels = labels.to(dtype=torch.long)
 
         if global_sum is None:
             global_sum = images_01.sum(dim=0, dtype=torch.float64)
@@ -154,7 +167,7 @@ def compute_global_and_class_means(train_loader, device: torch.device):
 def _iter_eeg_label_batches(dataset: EEGImageLatentDataset, batch_size: int):
     total = len(dataset._sample_index)
     for start in range(0, total, batch_size):
-        batch_samples = dataset._sample_index[start : start + batch_size]
+        batch_samples = dataset._sample_index[start: start + batch_size]
         eeg_batch = []
         labels = []
         for image_index, rep_index in batch_samples:
@@ -168,13 +181,158 @@ def _iter_eeg_label_batches(dataset: EEGImageLatentDataset, batch_size: int):
         yield torch.stack(eeg_batch, dim=0), torch.tensor(labels, dtype=torch.long), batch_samples
 
 
+def _load_pt(path: Path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def _extract_state_dict(ckpt_obj):
+    if isinstance(ckpt_obj, dict):
+        priority_keys = (
+            "state_dict",
+            "model",
+            "ema",
+            "ema_state_dict",
+            "model_state_dict",
+            "module",
+        )
+        for key in priority_keys:
+            value = ckpt_obj.get(key)
+            if isinstance(value, dict):
+                return value
+        if ckpt_obj and all(torch.is_tensor(v) for v in ckpt_obj.values()):
+            return ckpt_obj
+    raise ValueError("Could not find a usable state_dict in checkpoint.")
+
+
+def _try_load_sae_weights(model: torch.nn.Module, checkpoint_path: Path):
+    ckpt = _load_pt(checkpoint_path)
+    raw_state = _extract_state_dict(ckpt)
+    candidate_prefixes = (
+        "",
+        "model.",
+        "module.",
+        "ema_model.",
+        "ema.",
+        "autoencoder.",
+        "net.",
+    )
+
+    last_missing = []
+    last_unexpected = []
+    for prefix in candidate_prefixes:
+        state = {}
+        for key, value in raw_state.items():
+            if prefix:
+                if key.startswith(prefix):
+                    state[key[len(prefix):]] = value
+            else:
+                state[key] = value
+        try:
+            missing, unexpected = model.load_state_dict(state, strict=False)
+        except RuntimeError:
+            continue
+
+        model_keys = set(model.state_dict().keys())
+        loaded_keys = set(state.keys())
+        overlap = len(model_keys & loaded_keys)
+        if overlap > 0:
+            return list(missing), list(unexpected)
+        last_missing = list(missing)
+        last_unexpected = list(unexpected)
+
+    return last_missing, last_unexpected
+
+
+def _build_dino_sae_model(
+    dino_repo_root: Path,
+    sae_checkpoint: Path,
+    dino_weights_path: Path,
+    dino_model_name: str,
+    device: torch.device,
+):
+    src_dir = dino_repo_root / "src"
+    if not src_dir.exists():
+        raise FileNotFoundError(f"Could not find src/ under DINO repo root: {dino_repo_root}")
+    sys.path.insert(0, str(src_dir))
+
+    try:
+        from model import DINOSphericalAutoencoder, DecoderConfig
+    except ImportError as exc:
+        raise ImportError(
+            "Failed to import DINO-SAE model code from dino-repo-root/src. "
+            "Install DINO-SAE dependencies and verify path."
+        ) from exc
+
+    dino_cfg = OmegaConf.create(
+        {
+            "repo_path": str(src_dir / "dinov3"),
+            "model_name": str(dino_model_name),
+            "weights_path": str(dino_weights_path),
+        }
+    )
+    decoder_cfg = DecoderConfig(
+        in_channels=3,
+        latent_channels=1024,
+        in_shortcut="duplicating",
+        width_list=(256, 512, 512, 1024, 1024),
+        depth_list=(5, 5, 3, 3, 3),
+        block_type=["ResBlock", "ResBlock", "ResBlock", "EViT_GLU", "EViT_GLU"],
+        norm="trms2d",
+        act="silu",
+        upsample_block_type="InterpolateConv",
+        upsample_match_channel=True,
+        upsample_shortcut="duplicating",
+        out_norm="trms2d",
+        out_act="relu",
+    )
+    model = DINOSphericalAutoencoder(
+        dino_cfg=dino_cfg,
+        decoder_cfg=decoder_cfg,
+        train_cnn_embedder=False,
+    )
+    missing, unexpected = _try_load_sae_weights(model=model, checkpoint_path=sae_checkpoint)
+    model.to(device)
+    model.eval()
+    return model, missing, unexpected
+
+
+def _denormalize_imagenet(x: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor((0.485, 0.456, 0.406), dtype=x.dtype, device=x.device).view(1, 3, 1, 1)
+    std = torch.tensor((0.229, 0.224, 0.225), dtype=x.dtype, device=x.device).view(1, 3, 1, 1)
+    return x * std + mean
+
+
+def _choose_auto_mode(decoded: torch.Tensor) -> str:
+    min_v = float(decoded.min().item())
+    max_v = float(decoded.max().item())
+    if min_v >= 0.0 and max_v <= 1.25:
+        return "zero_one"
+    if -0.05 <= min_v and max_v <= 1.05:
+        return "zero_one"
+    if -1.25 <= min_v and max_v <= 1.25:
+        return "minus_one_one"
+    return "imagenet"
+
+
+def _to_display_range(decoded: torch.Tensor, mode: str) -> torch.Tensor:
+    if mode == "zero_one":
+        return decoded.clamp(0.0, 1.0)
+    if mode == "minus_one_one":
+        return ((decoded + 1.0) / 2.0).clamp(0.0, 1.0)
+    if mode == "imagenet":
+        return _denormalize_imagenet(decoded).clamp(0.0, 1.0)
+    raise ValueError(f"Unsupported output mode: {mode}")
+
+
 def main():
     args = parse_args()
     StructuralSimilarityIndexMeasure, lpips = _load_metrics_deps()
-
     device_t = resolve_torch_device(args.device)
 
-    runs_base = repo_root / "outputs" / "eeg_encoder"
+    runs_base = repo_root / "outputs" / "eeg_encoder_dino"
     run_dir: Path | None = None
     if args.checkpoint_path is None:
         run_dir = find_latest_run_dir(runs_base)
@@ -235,13 +393,14 @@ def main():
         raise RuntimeError("Test dataset is empty after filtering missing ground-truth images.")
     if len(test_dataset._sample_index) == 0:
         raise RuntimeError("No test samples remain after filtering.")
+
     first_image_index, first_rep_index = test_dataset._sample_index[0]
     sample_eeg = test_dataset.eeg[first_image_index, first_rep_index]
     if test_dataset.transform:
         sample_eeg = test_dataset.transform(sample_eeg)
     if not torch.is_tensor(sample_eeg):
         sample_eeg = torch.as_tensor(sample_eeg)
-    sample_latent = torch.zeros(int(saved_cfg.get("output_dim", 512)), dtype=torch.float32)
+    sample_latent = torch.zeros(int(saved_cfg.get("output_dim", 128)), dtype=torch.float32)
     model = build_model_for_checkpoint(
         model_state_dict=ckpt["model_state_dict"],
         sample_eeg=sample_eeg,
@@ -264,13 +423,31 @@ def main():
     if c * h * w != int(pca["d"]):
         raise ValueError(f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}.")
 
-    AutoencoderKL = load_autoencoder_kl_class()
-    vae = AutoencoderKL.from_pretrained(args.vae_name).to(device_t).eval()
-    metadata = load_metadata(Path(args.metadata_path))
-    scaling_factor = load_scaling_factor(Path(args.metadata_path), vae)
-    decode_scaling_mode = resolve_decode_latent_scaling_mode(
-        mode_arg=args.decode_latent_scaling,
-        metadata=metadata,
+    dino_repo_root = Path(args.dino_repo_root)
+    if not dino_repo_root.is_absolute():
+        dino_repo_root = repo_root / dino_repo_root
+    sae_checkpoint = Path(args.sae_checkpoint)
+    if not sae_checkpoint.is_absolute():
+        sae_checkpoint = repo_root / sae_checkpoint
+    if args.dino_weights_path is None:
+        dino_weights_path = dino_repo_root / "src" / "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    else:
+        dino_weights_path = Path(args.dino_weights_path)
+        if not dino_weights_path.is_absolute():
+            dino_weights_path = repo_root / dino_weights_path
+    if not dino_repo_root.exists():
+        raise FileNotFoundError(f"dino-repo-root not found: {dino_repo_root}")
+    if not sae_checkpoint.exists():
+        raise FileNotFoundError(f"sae-checkpoint not found: {sae_checkpoint}")
+    if not dino_weights_path.exists():
+        raise FileNotFoundError(f"dino-weights-path not found: {dino_weights_path}")
+
+    dino_model, missing_keys, unexpected_keys = _build_dino_sae_model(
+        dino_repo_root=dino_repo_root,
+        sae_checkpoint=sae_checkpoint,
+        dino_weights_path=dino_weights_path,
+        dino_model_name=args.dino_model_name,
+        device=device_t,
     )
 
     image_transform = build_image_transform(image_size=(args.image_size, args.image_size))
@@ -300,8 +477,7 @@ def main():
         raise RuntimeError("No training images remain after filtering missing files for baselines.")
 
     global_mean_01, class_means_01, train_count, class_train_counts = compute_global_and_class_means(
-        train_loader=train_loader,
-        device=device_t,
+        train_loader=train_loader
     )
 
     ssim_model = StructuralSimilarityIndexMeasure(data_range=1.0).to(device_t)
@@ -328,9 +504,10 @@ def main():
     print(f"Train samples (for means): {train_count}")
     print(f"Test samples (EEG): {len(test_dataset)}")
     print(f"PCA shape: k={pca['k']}, D={pca['d']}")
-    print(f"Scaling factor: {scaling_factor}")
     print(f"PCA standardized: {pca['standardized']}")
-    print(f"Decode latent scaling mode: {decode_scaling_mode}")
+    print(f"Output mode: {args.output_mode}")
+    print(f"Missing keys when loading SAE checkpoint: {len(missing_keys)}")
+    print(f"Unexpected keys when loading SAE checkpoint: {len(unexpected_keys)}")
 
     with torch.no_grad():
         for eeg, labels, batch_samples in _iter_eeg_label_batches(
@@ -352,14 +529,13 @@ def main():
             pred_pca = model(eeg)
             if pred_pca.shape[1] != int(pca["k"]):
                 raise RuntimeError(f"Predicted latent dim {pred_pca.shape[1]} does not match PCA k={pca['k']}.")
-            recon_01 = decode_from_pca_prediction(
-                pred_pca=pred_pca,
-                pca=pca,
-                latent_shape=(c, h, w),
-                vae=vae,
-                scaling_factor=scaling_factor,
-                decode_scaling_mode=decode_scaling_mode,
-            )
+            z_full = inverse_pca_prediction(pred_pca=pred_pca, pca=pca)
+            z_grid = z_full.view(-1, c, h, w)
+            decoded = dino_model.decode(z_grid)
+            mode = args.output_mode
+            if mode == "auto":
+                mode = _choose_auto_mode(decoded)
+            recon_01 = _to_display_range(decoded, mode=mode)
             if recon_01.shape[-2:] != (args.image_size, args.image_size):
                 recon_01 = F.interpolate(
                     recon_01,
@@ -381,7 +557,7 @@ def main():
                 targets.append(gt_01)
             target_01 = torch.stack(targets, dim=0).to(device=device_t, dtype=torch.float32)
 
-            global_pred_01 = global_mean_01.unsqueeze(0).expand(batch_n, -1, -1, -1)
+            global_pred_01 = global_mean_01.to(device=device_t).unsqueeze(0).expand(batch_n, -1, -1, -1)
             class_pred_01 = torch.empty_like(target_01)
             for cls in labels.unique():
                 cls_int = int(cls.item())
@@ -390,7 +566,7 @@ def main():
                         f"Missing class mean for class {cls_int}. "
                         "Train and test class subsets must match."
                     )
-                class_pred_01[labels == cls] = class_means_01[cls_int]
+                class_pred_01[labels == cls] = class_means_01[cls_int].to(device=device_t)
 
             ssim_model.update(recon_01, target_01)
             ssim_global.update(global_pred_01, target_01)
@@ -428,6 +604,7 @@ def main():
         "LPIPS_class_mean": float(lpips_sum_class / float(test_count)),
         "class_train_counts": {str(k): int(v) for k, v in sorted(class_train_counts.items())},
         "class_indices": class_indices,
+        "dino_output_mode": args.output_mode,
     }
 
     metrics_path = output_dir / args.metrics_name

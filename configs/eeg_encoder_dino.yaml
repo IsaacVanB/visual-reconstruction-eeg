@@ -1,12 +1,12 @@
 # Data
 dataset_root: datasets
-# Directory containing image latents (PCA targets) for EEG training.
-image_latent_root: latents/img_pca_64_all
+# Directory containing DINO latent targets.
+image_latent_root: latents/img_dino_pca_256
 subject: sub-1
 split_seed: 0
 
-# Match latent PCA dimensionality.
-output_dim: 64
+# Match DINO latent target dimensionality (PCA k by default).
+output_dim: 256
 
 # Optimization
 batch_size: 16
@@ -17,7 +17,7 @@ epochs: 15
 
 # Runtime/output
 device: auto
-output_dir: outputs/eeg_encoder
+output_dir: outputs/eeg_encoder_dino
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -34,6 +34,6 @@ averaging_mode: all
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]
 # - all: use every class available in the dataset
-class_subset: all
+class_subset: default100
 # Optional explicit override (takes precedence over class_subset when provided):
 # class_indices: [0, 1, 2, 3]

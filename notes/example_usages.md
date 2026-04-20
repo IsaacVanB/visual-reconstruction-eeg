@@ -53,6 +53,20 @@ python scripts/train_eeg_encoder.py \
   --device cuda
 ```
 
+`scripts/train_eeg_encoder_dino.py`  
+CLI wrapper for EEG encoder training against DINO latent targets.
+Example usage:
+```bash
+python scripts/train_eeg_encoder_dino.py \
+  --config configs/eeg_encoder_dino.yaml \
+  --dataset-root datasets \
+  --latent-root latents/img_dino_pca_128 \
+  --output-dim 128 \
+  --epochs 20 \
+  --output-dir outputs/eeg_encoder_dino \
+  --device cuda
+```
+
 `scripts/extract_image_embeds.py`  
 Unified embedding pipeline:
 - extracts full SD-VAE latents (`img_full`)
@@ -125,6 +139,19 @@ bash scripts/run_eeg_encoder_experiment.sh \
   --config configs/eeg_encoder.yaml \
   --epochs 40 \
   --eval --max-samples 16 --grid-images 8
+```
+
+`scripts/run_eeg_encoder_dino_experiment.sh`  
+DINO experiment runner: train -> DINO decode eval.
+Example usage:
+```bash
+bash scripts/run_eeg_encoder_dino_experiment.sh \
+  --config configs/eeg_encoder_dino.yaml \
+  --epochs 40 \
+  --eval --max-samples 16 --grid-images 8 \
+  --latent-shape 1024 16 16 \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt
 ```
 Mean-image baseline is now a separate script run:
 ```bash
@@ -260,6 +287,47 @@ python src/evaluation/eval_eeg_encoder.py \
   --grid-images 8 \
   --device cuda \
   --output-dir outputs/decoded_eeg_img
+```
+
+`src/evaluation/eval_eeg_encoder_dino.py`  
+Runs EEG encoder on test set, inverse-PCA + DINO-SAE decode, saves reconstructions and a recon grid.
+Example usage:
+```bash
+python src/evaluation/eval_eeg_encoder_dino.py \
+  --checkpoint-path outputs/eeg_encoder_dino/run_20260420_210000/eeg_encoder_20260420_210000.pt \
+  --dataset-root datasets \
+  --latent-root latents/img_dino_pca_128 \
+  --pca-params-path latents/img_dino_pca_128/pca_128.pt \
+  --latent-shape 1024 16 16 \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --batch-size 4 \
+  --max-samples 16 \
+  --grid-images 8 \
+  --device cuda \
+  --output-dir outputs/eeg_encoder_dino/eval
+```
+
+`src/evaluation/eval_eeg_with_mean_baselines_dino.py`  
+Evaluates DINO EEG reconstructions and compares against global/class train mean baselines (SSIM/LPIPS).
+Example usage:
+```bash
+python src/evaluation/eval_eeg_with_mean_baselines_dino.py \
+  --checkpoint-path outputs/eeg_encoder_dino/run_20260420_210000/eeg_encoder_20260420_210000.pt \
+  --dataset-root datasets \
+  --latent-root latents/img_dino_pca_128 \
+  --pca-params-path latents/img_dino_pca_128/pca_128.pt \
+  --latent-shape 1024 16 16 \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --output-mode zero_one \
+  --image-size 256 \
+  --batch-size 4 \
+  --max-samples 16 \
+  --device cuda \
+  --lpips-net alex \
+  --output-dir outputs/eeg_encoder_dino/eval \
+  --metrics-name eeg_vs_baselines_metrics.json
 ```
 
 `src/evaluation/eval_eeg_with_mean_baselines.py`  
