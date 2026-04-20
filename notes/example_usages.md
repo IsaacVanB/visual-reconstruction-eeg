@@ -1,61 +1,95 @@
 # Example Usages
 
-This file documents each tracked file in the repo and how to use it.
+This file documents active, tracked code paths for the current DINO-based pipeline.
 
-## Table of Contents
+## Minimum Runbook
 
-- [Config Files](#config-files)
-- [Scripts](#scripts)
-- [Source: Data](#source-data)
-- [Source: Models](#source-models)
-- [Source: Training](#source-training)
-- [Source: Evaluation](#source-evaluation)
-- [Tests and Debug Utilities](#tests-and-debug-utilities)
-- [Notes](#notes)
-
-
-## Config Files
-
-`configs/eeg_encoder.yaml`  
-Default config for EEG encoder training against PCA latents.
-Example usage:
+1) Extract DINO targets (full + PCA-128 with standardization):
 ```bash
-python scripts/train_eeg_encoder.py --config configs/eeg_encoder.yaml
+python scripts/dino_extract_image_embeds.py \
+  --dataset-root datasets \
+  --output-root latents \
+  --embedding-type both \
+  --full-dir-name img_dino_full \
+  --pca-dir-name img_dino_pca_128 \
+  --n-components 128 \
+  --standardize-pca \
+  --pca-scope train \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --image-size 256 \
+  --class-subset all \
+  --split-seed 0 \
+  --device cuda
+```
+
+2) Train + run DINO reconstruction eval + SSIM/LPIPS baseline eval:
+```bash
+bash scripts/run_eeg_encoder_dino_experiment.sh \
+  --config configs/eeg_encoder_dino.yaml \
+  --eval --max-samples 16 --grid-images 8 \
+  --baseline --output-mode zero_one --image-size 256
+```
+
+3) (Optional) Reconstruct one PCA latent directly for debugging:
+```bash
+python scripts/dino_latent_reconstruct.py \
+  --latent-path latents/img_dino_pca_128/000000.pt \
+  --pca-params-path latents/img_dino_pca_128/pca_128.pt \
+  --latent-shape 1024 16 16 \
+  --output-path outputs/dino_recon_debug.png \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --output-mode zero_one \
+  --device cuda
+```
+
+## Config
+
+`configs/eeg_encoder_dino.yaml`  
+Default config for EEG encoder training against DINO PCA latents.
+```bash
+python scripts/train_eeg_encoder_dino.py --config configs/eeg_encoder_dino.yaml
 ```
 
 ## Scripts
 
-`scripts/train_eeg_encoder.py`  
-CLI wrapper for EEG encoder training.
-Example usage (all CLI params):
+`scripts/dino_extract_image_embeds.py`  
+Extract DINO-SAE full latent grids and optionally PCA latents (with optional PCA z-score standardization).
 ```bash
-python scripts/train_eeg_encoder.py \
-  --config configs/eeg_encoder.yaml \
+python scripts/dino_extract_image_embeds.py \
   --dataset-root datasets \
-  --latent-root latents/img_pca \
-  --subject sub-1 \
-  --class-indices 0 2 4 6 8 \
+  --output-root latents \
+  --embedding-type both \
+  --full-dir-name img_dino_full \
+  --pca-dir-name img_dino_pca_128 \
+  --n-components 128 \
+  --standardize-pca \
+  --pca-scope train \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --image-size 256 \
+  --class-subset all \
   --split-seed 0 \
-  --output-dim 128 \
-  --temporal-filters 32 \
-  --depth-multiplier 2 \
-  --temporal-kernel1 51 \
-  --temporal-kernel3 13 \
-  --pool1 2 \
-  --pool3 5 \
-  --dropout 0.3 \
-  --batch-size 16 \
-  --num-workers 0 \
-  --lr 0.001 \
-  --weight-decay 0.0001 \
-  --epochs 20 \
-  --output-dir outputs/eeg_encoder \
+  --device cuda
+```
+
+`scripts/dino_latent_reconstruct.py`  
+Reconstruct an image from either full DINO latent or PCA latent (+ inverse standardization + inverse PCA).
+```bash
+python scripts/dino_latent_reconstruct.py \
+  --latent-path latents/img_dino_pca_128/000000.pt \
+  --pca-params-path latents/img_dino_pca_128/pca_128.pt \
+  --latent-shape 1024 16 16 \
+  --output-path outputs/dino_recon.png \
+  --dino-repo-root dino-sae \
+  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --output-mode zero_one \
   --device cuda
 ```
 
 `scripts/train_eeg_encoder_dino.py`  
-CLI wrapper for EEG encoder training against DINO latent targets.
-Example usage:
+CLI wrapper for EEG encoder training.
 ```bash
 python scripts/train_eeg_encoder_dino.py \
   --config configs/eeg_encoder_dino.yaml \
@@ -67,123 +101,29 @@ python scripts/train_eeg_encoder_dino.py \
   --device cuda
 ```
 
-`scripts/extract_image_embeds.py`  
-Unified embedding pipeline:
-- extracts full SD-VAE latents (`img_full`)
-- optionally converts them to PCA latents (`img_pca`)
-- fits PCA on train split only and applies the same transform to valid split
-- optionally standardizes PCA coefficients using train-set mean/std
-- writes metadata + PCA params
-Example usage (all CLI params):
-```bash
-python scripts/extract_image_embeds.py \
-  --dataset-root datasets \
-  --output-root latents \
-  --embedding-type both \
-  --vae-name stabilityai/sd-vae-ft-mse \
-  --image-size 512 \
-  --device cuda \
-  --split-seed 0 \
-  --class-indices 0 2 4 6 8 \
-  --full-dir-name img_full \
-  --pca-dir-name img_pca \
-  --n-components 128 \
-  --pca-save-dtype float32 \
-  --pca-params-path latents/img_pca/pca_128.pt \
-  --standardize-pca \
-  --pca-std-eps 1e-6
-```
-Optional PCA flag:
-```bash
-python scripts/extract_image_embeds.py \
-  --embedding-type pca \
-  --output-root latents \
-  --n-components 128 \
-  --no-explained-variance
-```
-
-`scripts/latent_decode.py`  
-Decodes PCA-space latent vectors by inverse PCA + inverse scaling + SD VAE decode.
-Example usage (all CLI params):
-```bash
-python scripts/latent_decode.py \
-  --latent-path latents/img_pca/000000.pt \
-  --pca-params-path latents/img_pca/pca_128.pt \
-  --output-path outputs/latent_decode.png \
-  --vae-name stabilityai/sd-vae-ft-mse \
-  --latent-shape 4 64 64 \
-  --metadata-path latents/img_full_metadata.json \
-  --device cuda
-```
-If latent file stores a dict:
-```bash
-python scripts/latent_decode.py --latent-path some_pred.pt --latent-key prediction
-```
-
-`scripts/run_eeg_encoder_experiment.sh`  
-Experiment runner: train -> evaluate.
-Example usage:
-```bash
-bash scripts/run_eeg_encoder_experiment.sh
-```
-Runner options:
-```bash
-bash scripts/run_eeg_encoder_experiment.sh \
-  --output-base outputs/eeg_encoder \
-  --run-name my_run \
-  --skip-eval
-```
-Forwarding train/eval args:
-```bash
-bash scripts/run_eeg_encoder_experiment.sh \
-  --config configs/eeg_encoder.yaml \
-  --epochs 40 \
-  --eval --max-samples 16 --grid-images 8
-```
-
 `scripts/run_eeg_encoder_dino_experiment.sh`  
-DINO experiment runner: train -> DINO decode eval.
-Example usage:
+Runner for train -> reconstruction eval -> SSIM/LPIPS baseline eval.
 ```bash
 bash scripts/run_eeg_encoder_dino_experiment.sh \
   --config configs/eeg_encoder_dino.yaml \
-  --epochs 40 \
   --eval --max-samples 16 --grid-images 8 \
-  --latent-shape 1024 16 16 \
-  --dino-repo-root dino-sae \
-  --sae-checkpoint dino-sae/ema_model_step_470000.pt
+  --baseline --output-mode zero_one --image-size 256
 ```
-Mean-image baseline is now a separate script run:
+
+`scripts/pca_target_stats.py`  
+Compute summary stats over latent targets for train/valid split.
 ```bash
-python scripts/eval_mean_image_baseline.py \
+python scripts/pca_target_stats.py \
   --dataset-root datasets \
+  --latent-root latents/img_dino_pca_128 \
   --split-seed 0 \
-  --class-indices 0 2 4 6 8 \
-  --mean-mode class \
-  --image-size 256 \
-  --batch-size 32 \
-  --num-workers 0 \
-  --device cuda \
-  --lpips-net alex \
-  --output-dir outputs/eeg_encoder/mean_baseline \
-  --metrics-name baseline_metrics.json
+  --output-path outputs/pca_target_stats_dino.json
 ```
 
 ## Source: Data
 
-`src/data/__init__.py`  
-Exports dataset, dataloader, and transform builders.
-Example usage:
-```python
-from src.data import EEGImageDataset, EEGImageLatentDataset, build_eeg_dataloader
-```
-
 `src/data/datasets.py`  
-Defines:
-- `EEGImageDataset`: EEG + paired image + label
-- `EEGImageLatentDataset`: EEG + precomputed latent + label
-- `ImageDataset`: image + label
-Example usage:
+Core dataset classes (`EEGImageDataset`, `EEGImageLatentDataset`, averaging variants, `ImageDataset`).
 ```python
 from src.data import EEGImageLatentDataset
 
@@ -191,116 +131,53 @@ ds = EEGImageLatentDataset(
     dataset_root="datasets",
     subject="sub-1",
     split="train",
-    class_indices=[0, 2, 4],
-    latent_root="latents/img_pca",
+    class_indices=[0, 1, 2],
+    latent_root="latents/img_dino_pca_128",
     split_seed=0,
 )
 eeg, latent, label = ds[0]
 ```
 
-`src/data/dataloader.py`  
-Builders for `DataLoader` objects.
-Example usage:
-```python
-from src.data import build_eeg_dataloader
-
-loader = build_eeg_dataloader(
-    dataset_root="datasets",
-    split="train",
-    batch_size=32,
-    split_seed=0,
-)
-```
-
-`src/data/transforms.py`  
-Custom transform utilities for EEG/image preprocessing.
-Example usage:
-```python
-from src.data import build_eeg_transform, build_image_transform
-
-eeg_tf = build_eeg_transform(normalize_per_sample=True, to_tensor=True)
-img_tf = build_image_transform(image_size=(256, 256), mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-```
+`src/data/dataloader.py` and `src/data/transforms.py`  
+Helpers for loader construction and EEG/image transforms.
 
 ## Source: Models
 
-`src/models/__init__.py`  
-Exports model classes.
-Example usage:
-```python
-from src.models import EEGEncoderCNN
-```
-
 `src/models/eeg_encoder.py`  
-CNN encoder for EEG input `[B, C, T]` with output embedding `[B, k]`.
-Example usage:
+CNN encoder mapping EEG `[B,C,T]` -> latent target vector `[B,K]`.
 ```python
 import torch
 from src.models import EEGEncoderCNN
 
 model = EEGEncoderCNN(eeg_channels=17, eeg_timesteps=100, output_dim=128)
-x = torch.randn(8, 17, 100)
-y = model(x)  # [8, 128]
+y = model(torch.randn(8, 17, 100))
 ```
 
 ## Source: Training
 
-`src/training/__init__.py`  
-Exports train/config loaders for VAE and EEG encoder.
-Example usage:
+`src/training/train_eeg_encoder.py`  
+Shared training loop used by the DINO training wrapper.
 ```python
 from src.training import load_eeg_encoder_config, train_eeg_encoder
-```
 
-`src/training/train_eeg_encoder.py`  
-Core EEG-encoder training loop against latent targets (MSE), with timestamped artifacts.
-Example usage:
-```python
-from src.training.train_eeg_encoder import load_eeg_encoder_config, train_eeg_encoder
-
-cfg = load_eeg_encoder_config("configs/eeg_encoder.yaml")
+cfg = load_eeg_encoder_config("configs/eeg_encoder_dino.yaml")
 train_eeg_encoder(cfg)
 ```
 
 ## Source: Evaluation
 
-`src/evaluation/eval_eeg_encoder.py`  
-Runs EEG encoder on test set, inverse-PCA + VAE decode, saves reconstructions and a recon grid.
-Example usage (all CLI params):
-```bash
-python src/evaluation/eval_eeg_encoder.py \
-  --checkpoint-path outputs/eeg_encoder/eeg_encoder.pt \
-  --dataset-root datasets \
-  --latent-root latents/img_pca \
-  --subject sub-1 \
-  --split-seed 0 \
-  --class-indices 0 2 4 6 8 \
-  --pca-params-path latents/img_pca/pca_128.pt \
-  --metadata-path latents/img_full_metadata.json \
-  --decode-latent-scaling auto \
-  --vae-name stabilityai/sd-vae-ft-mse \
-  --latent-shape 4 64 64 \
-  --batch-size 4 \
-  --num-workers 0 \
-  --max-samples 16 \
-  --num-images 16 \
-  --grid-images 8 \
-  --device cuda \
-  --output-dir outputs/decoded_eeg_img
-```
-
 `src/evaluation/eval_eeg_encoder_dino.py`  
-Runs EEG encoder on test set, inverse-PCA + DINO-SAE decode, saves reconstructions and a recon grid.
-Example usage:
+Runs EEG encoder on test split, inverse PCA, DINO decode, and saves reconstructions + grid.
 ```bash
 python src/evaluation/eval_eeg_encoder_dino.py \
-  --checkpoint-path outputs/eeg_encoder_dino/run_20260420_210000/eeg_encoder_20260420_210000.pt \
+  --checkpoint-path outputs/eeg_encoder_dino/run_YYYYMMDD_HHMMSS/eeg_encoder_*.pt \
   --dataset-root datasets \
   --latent-root latents/img_dino_pca_128 \
   --pca-params-path latents/img_dino_pca_128/pca_128.pt \
   --latent-shape 1024 16 16 \
   --dino-repo-root dino-sae \
   --sae-checkpoint dino-sae/ema_model_step_470000.pt \
+  --output-mode zero_one \
   --batch-size 4 \
   --max-samples 16 \
   --grid-images 8 \
@@ -309,11 +186,10 @@ python src/evaluation/eval_eeg_encoder_dino.py \
 ```
 
 `src/evaluation/eval_eeg_with_mean_baselines_dino.py`  
-Evaluates DINO EEG reconstructions and compares against global/class train mean baselines (SSIM/LPIPS).
-Example usage:
+Computes SSIM/LPIPS for model predictions vs global/class mean-image baselines.
 ```bash
 python src/evaluation/eval_eeg_with_mean_baselines_dino.py \
-  --checkpoint-path outputs/eeg_encoder_dino/run_20260420_210000/eeg_encoder_20260420_210000.pt \
+  --checkpoint-path outputs/eeg_encoder_dino/run_YYYYMMDD_HHMMSS/eeg_encoder_*.pt \
   --dataset-root datasets \
   --latent-root latents/img_dino_pca_128 \
   --pca-params-path latents/img_dino_pca_128/pca_128.pt \
@@ -330,76 +206,25 @@ python src/evaluation/eval_eeg_with_mean_baselines_dino.py \
   --metrics-name eeg_vs_baselines_metrics.json
 ```
 
-`src/evaluation/eval_eeg_with_mean_baselines.py`  
-Evaluates EEG reconstructions and compares against global/class train mean baselines (SSIM/LPIPS).
-Example usage (all CLI params):
-```bash
-python src/evaluation/eval_eeg_with_mean_baselines.py \
-  --checkpoint-path outputs/eeg_encoder/run_20260312_185501/run_20260312_185501.pt \
-  --dataset-root datasets \
-  --latent-root latents/img_pca \
-  --subject sub-1 \
-  --split-seed 0 \
-  --class-indices 0 2 4 6 8 \
-  --pca-params-path latents/img_pca/pca_128.pt \
-  --metadata-path latents/img_full_metadata.json \
-  --decode-latent-scaling auto \
-  --vae-name stabilityai/sd-vae-ft-mse \
-  --latent-shape 4 64 64 \
-  --image-size 512 \
-  --batch-size 4 \
-  --num-workers 0 \
-  --max-samples 16 \
-  --device cuda \
-  --lpips-net alex \
-  --output-dir outputs/eeg_encoder/run_20260312_185501/baseline_eval \
-  --metrics-name eeg_vs_baselines_metrics.json
-```
-Auto-run mode (no args): picks latest run under `outputs/eeg_encoder` and writes to `<run>/baseline_eval`.
-
 `src/evaluation/eeg_eval_core.py`  
-Shared evaluation core used by both EEG eval scripts (checkpoint/model loading, PCA inversion, decode scaling, image loading).
+Shared checkpoint/model/loader/eval utility functions used by evaluation scripts.
 
-`src/evaluation/eval_mean_image_baseline.py`  
-Compatibility wrapper that forwards to `scripts/eval_mean_image_baseline.py`.
-
-## Tests and Debug Utilities
+## Tests and Utilities
 
 `tests/print_eeg_latent_dataset_samples.py`  
-Print sample shapes from `EEGImageLatentDataset` and validates expected length.
-Example usage:
 ```bash
-EEG_DATASET_ROOT=datasets EEG_LATENT_ROOT=latents/img_pca EEG_SPLIT=test EEG_CLASS_INDICES=0,2,4 python tests/print_eeg_latent_dataset_samples.py
+EEG_DATASET_ROOT=datasets EEG_LATENT_ROOT=latents/img_dino_pca_128 EEG_SPLIT=test python tests/print_eeg_latent_dataset_samples.py
 ```
 
 `tests/inspect_eeg_image_pair.py`  
-Deep inspection utility for one split image and repetition; can render/save selected image.
-Example usage:
 ```bash
-EEG_DATASET_ROOT=datasets EEG_SPLIT=train EEG_SPLIT_IMG_IDX=0 EEG_SAMPLE_REP=0 EEG_SAVE_FIG=outputs/inspect_pair.png python tests/inspect_eeg_image_pair.py
+EEG_DATASET_ROOT=datasets EEG_SPLIT=train EEG_SPLIT_IMG_IDX=0 EEG_SAMPLE_REP=0 python tests/inspect_eeg_image_pair.py
 ```
 
 `tests/verify_eeg_image_pairing.py`  
-Invariant checks for EEG-image alignment and split partitioning.
-Example usage:
 ```bash
 EEG_DATASET_ROOT=datasets EEG_SUBJECT=sub-1 EEG_SPLIT_SEED=0 python tests/verify_eeg_image_pairing.py
 ```
 
 `tests/stable_diffusion_test.py`  
-Standalone img2img “polish” script (supports single image or directory input).
-Example usage (all CLI params):
-```bash
-python tests/stable_diffusion_test.py \
-  --input_dir outputs/sd_vae_recon \
-  --output_dir outputs/sd_polished \
-  --model_id runwayml/stable-diffusion-v1-5 \
-  --size 512 \
-  --prompt "" \
-  --negative_prompt "" \
-  --strength 0.2 \
-  --guidance_scale 5.0 \
-  --steps 25 \
-  --seed 0 \
-  --fp16
-```
+Legacy image-polish utility (not part of the DINO core training/eval pipeline).
