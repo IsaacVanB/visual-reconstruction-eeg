@@ -14,12 +14,14 @@ num_workers: 0
 lr: 0.0001
 weight_decay: 0.001
 epochs: 15
+mse_loss_weight: 0.5
+cosine_loss_weight: 0.5
 
 # Runtime/output
 device: auto
 output_dir: outputs/eeg_encoder_dino
 # Freeform note about what changed since the last run; saved as a .txt artifact per run.
-run_change_note: "Changed loss from MSE to cosine"
+run_change_note: "Changed to combined MSE and cosine loss"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none

@@ -123,6 +123,8 @@ class EEGEncoderConfig:
     lr: float
     weight_decay: float
     epochs: int
+    mse_loss_weight: float
+    cosine_loss_weight: float
 
     # Runtime/output:
     device: str
@@ -277,6 +279,8 @@ def load_eeg_encoder_config(
         lr=float(data["lr"]),
         weight_decay=float(data["weight_decay"]),
         epochs=int(data["epochs"]),
+        mse_loss_weight=float(data.get("mse_loss_weight", 0.5)),
+        cosine_loss_weight=float(data.get("cosine_loss_weight", 0.5)),
         device=str(data["device"]),
         output_dir=str(data["output_dir"]),
         run_change_note=(
@@ -379,6 +383,8 @@ def _run_epoch(
     model: EEGEncoderCNN,
     loader: DataLoader,
     device: torch.device,
+    mse_loss_weight: float,
+    cosine_loss_weight: float,
     optimizer: Optional[torch.optim.Optimizer] = None,
 ) -> dict[str, float]:
     is_train = optimizer is not None
@@ -402,8 +408,10 @@ def _run_epoch(
                     f"Prediction shape {tuple(pred.shape)} does not match "
                     f"target shape {tuple(target.shape)}"
                 )
-            # Cosine loss: maximize directional alignment between prediction and target embeddings.
-            loss = (1.0 - F.cosine_similarity(pred, target, dim=1)).mean()
+            # Combined objective with configurable per-term weights.
+            mse_loss = F.mse_loss(pred, target, reduction="mean")
+            cosine_loss = (1.0 - F.cosine_similarity(pred, target, dim=1)).mean()
+            loss = (mse_loss_weight * mse_loss) + (cosine_loss_weight * cosine_loss)
             if is_train:
                 loss.backward()
                 optimizer.step()
@@ -552,6 +560,10 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     else:
         print(f"Class indices: {len(config.class_indices)} classes")
     print(f"Latent root: {config.latent_root}")
+    print(
+        "Loss weights: "
+        f"mse={config.mse_loss_weight}, cosine={config.cosine_loss_weight}"
+    )
     print(f"Averaging mode: {config.averaging_mode}")
     print(f"k_repeats: {config.k_repeats}")
     print(f"Train samples: {len(train_loader.dataset)}")
@@ -567,18 +579,24 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             model=model,
             loader=train_loader,
             device=device,
+            mse_loss_weight=config.mse_loss_weight,
+            cosine_loss_weight=config.cosine_loss_weight,
             optimizer=optimizer,
         )
         train_eval_metrics = _run_epoch(
             model=model,
             loader=train_eval_loader,
             device=device,
+            mse_loss_weight=config.mse_loss_weight,
+            cosine_loss_weight=config.cosine_loss_weight,
             optimizer=None,
         )
         valid_metrics = _run_epoch(
             model=model,
             loader=valid_loader,
             device=device,
+            mse_loss_weight=config.mse_loss_weight,
+            cosine_loss_weight=config.cosine_loss_weight,
             optimizer=None,
         )
         history["train_loss"].append(train_metrics["loss"])
