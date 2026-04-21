@@ -16,7 +16,8 @@ from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
 
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
-SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
+DEFAULT_CLASS_INDICES_1000 = list(range(0, 2000, 2))
+SUPPORTED_CLASS_SUBSETS = {"default100", "default1000", "all"}
 SUPPORTED_EEG_NORMALIZATION = {"l2", "zscore", "none"}
 SUPPORTED_AVERAGING_MODES = {"all", "random_k"}
 REQUIRED_CONFIG_KEYS = (
@@ -108,7 +109,7 @@ class EEGEncoderConfig:
     latent_root: str
     subject: str
     split_seed: int
-    class_subset: str  # one of: default100, all
+    class_subset: str  # one of: default100, default1000, all
     class_indices: Optional[Sequence[int]]
 
     # Model architecture knobs:
@@ -126,6 +127,8 @@ class EEGEncoderConfig:
     # Runtime/output:
     device: str
     output_dir: str
+    # Freeform note describing model/training changes since the previous run.
+    run_change_note: Optional[str]
 
     # EEG preprocessing:
     # Keep this aligned between train and eval for consistent feature scale.
@@ -154,6 +157,33 @@ def _validate_required_config_keys(data: dict[str, Any], config_path: str) -> No
             f"Missing required key in {config_path}: image_latent_root (or legacy latent_root). "
             "Set one of them in configs/eeg_encoder.yaml or via CLI overrides."
         )
+
+
+def _resolve_preset_class_indices(dataset_root: str, class_subset: str) -> Optional[list[int]]:
+    subset = str(class_subset).lower()
+    if subset == "all":
+        return None
+
+    if subset == "default100":
+        requested = DEFAULT_CLASS_INDICES
+    elif subset == "default1000":
+        requested = DEFAULT_CLASS_INDICES_1000
+    else:
+        raise ValueError(f"Unsupported class_subset preset: {class_subset}")
+
+    metadata_path = Path(dataset_root) / "THINGS_EEG_2" / "image_metadata.npy"
+    if not metadata_path.exists():
+        # Keep backwards-compatible behavior if metadata cannot be read here.
+        return list(requested)
+    metadata = np.load(metadata_path, allow_pickle=True).item()
+    if "train_img_files" not in metadata:
+        return list(requested)
+    num_images = int(len(metadata["train_img_files"]))
+    images_per_class = 10
+    if num_images <= 0 or num_images % images_per_class != 0:
+        return list(requested)
+    num_classes = num_images // images_per_class
+    return [idx for idx in requested if int(idx) < int(num_classes)]
 
 
 def load_eeg_encoder_config(
@@ -187,10 +217,11 @@ def load_eeg_encoder_config(
         class_indices_raw = data.get("class_indices", None)
         if class_indices_raw is not None:
             class_indices = class_indices_raw
-        elif class_subset == "all":
-            class_indices = None
         else:
-            class_indices = DEFAULT_CLASS_INDICES
+            class_indices = _resolve_preset_class_indices(
+                dataset_root=str(data["dataset_root"]),
+                class_subset=class_subset,
+            )
     eeg_normalization = str(data["eeg_normalization"]).lower()
     if eeg_normalization not in SUPPORTED_EEG_NORMALIZATION:
         raise ValueError(
@@ -248,6 +279,11 @@ def load_eeg_encoder_config(
         epochs=int(data["epochs"]),
         device=str(data["device"]),
         output_dir=str(data["output_dir"]),
+        run_change_note=(
+            str(data["run_change_note"])
+            if data.get("run_change_note", None) is not None
+            else None
+        ),
         eeg_l2_normalize=(eeg_normalization == "l2"),
         pin_memory=bool(data.get("pin_memory", False)),
         eval_max_samples=(
@@ -366,8 +402,8 @@ def _run_epoch(
                     f"Prediction shape {tuple(pred.shape)} does not match "
                     f"target shape {tuple(target.shape)}"
                 )
-            # Safe to change objective (e.g., cosine/L1/Huber), but update evaluation expectations.
-            loss = F.mse_loss(pred, target, reduction="mean")
+            # Cosine loss: maximize directional alignment between prediction and target embeddings.
+            loss = (1.0 - F.cosine_similarity(pred, target, dim=1)).mean()
             if is_train:
                 loss.backward()
                 optimizer.step()
@@ -426,6 +462,11 @@ def _save_artifacts(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
+    note_path = output_dir / f"run_change_note_{saved_at}.txt"
+    with open(note_path, "w", encoding="utf-8") as f:
+        note = (config.run_change_note or "").strip()
+        f.write(note + "\n")
+
     epochs = list(range(1, len(history["train_loss"]) + 1))
     fig, ax = plt.subplots(1, 1, figsize=(6, 4))
     ax.plot(epochs, history["train_loss"], label="train")
@@ -445,6 +486,7 @@ def _save_artifacts(
         "curves": curve_path,
         "metrics": metrics_path,
         "summary": summary_path,
+        "run_change_note": note_path,
     }
 
 
@@ -560,4 +602,5 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     print(f"Saved curves: {artifact_paths['curves']}")
     print(f"Saved metrics: {artifact_paths['metrics']}")
     print(f"Saved summary: {artifact_paths['summary']}")
+    print(f"Saved run change note: {artifact_paths['run_change_note']}")
     return artifact_paths["checkpoint"]

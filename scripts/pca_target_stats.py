@@ -13,6 +13,7 @@ from src.data import ImageDataset
 
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
+DEFAULT_CLASS_INDICES_1000 = list(range(0, 2000, 2))
 
 
 def parse_args():
@@ -25,7 +26,11 @@ def parse_args():
     parser.add_argument("--dataset-root", default="datasets")
     parser.add_argument("--latent-root", default="latents/img_pca")
     parser.add_argument("--split-seed", type=int, default=0)
-    parser.add_argument("--class-subset", choices=["default100", "all"], default="default100")
+    parser.add_argument(
+        "--class-subset",
+        choices=["default100", "default1000", "all"],
+        default="default100",
+    )
     parser.add_argument("--class-indices", type=int, nargs="+", default=None)
     parser.add_argument(
         "--output-path",
@@ -36,6 +41,7 @@ def parse_args():
 
 
 def _resolve_class_indices(
+    dataset_root: Path,
     class_subset: str,
     class_indices: Sequence[int] | None,
 ) -> Sequence[int] | None:
@@ -43,7 +49,25 @@ def _resolve_class_indices(
         return [int(x) for x in class_indices]
     if class_subset == "all":
         return None
-    return list(DEFAULT_CLASS_INDICES)
+
+    if class_subset == "default100":
+        requested = DEFAULT_CLASS_INDICES
+    else:
+        requested = DEFAULT_CLASS_INDICES_1000
+
+    metadata_path = dataset_root / "THINGS_EEG_2" / "image_metadata.npy"
+    if not metadata_path.exists():
+        return list(requested)
+    metadata = np.load(metadata_path, allow_pickle=True).item()
+    train_files = metadata.get("train_img_files")
+    if train_files is None:
+        return list(requested)
+    num_images = int(len(train_files))
+    images_per_class = 10
+    if num_images <= 0 or num_images % images_per_class != 0:
+        return list(requested)
+    num_classes = num_images // images_per_class
+    return [idx for idx in requested if int(idx) < int(num_classes)]
 
 
 def _resolve_latent_path(latent_root: Path, image_index: int) -> Path:
@@ -137,6 +161,7 @@ def main():
         raise FileNotFoundError(f"latent-root not found: {latent_root}")
 
     class_indices = _resolve_class_indices(
+        dataset_root=dataset_root,
         class_subset=str(args.class_subset),
         class_indices=args.class_indices,
     )

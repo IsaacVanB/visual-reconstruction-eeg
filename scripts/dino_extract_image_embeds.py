@@ -18,7 +18,8 @@ from src.data import ImageDataset
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
-SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
+DEFAULT_CLASS_INDICES_1000 = list(range(0, 2000, 2))
+SUPPORTED_CLASS_SUBSETS = {"default100", "default1000", "all"}
 
 
 def parse_args():
@@ -76,10 +77,11 @@ def parse_args():
     )
     parser.add_argument(
         "--class-subset",
-        choices=["default100", "all"],
+        choices=["default100", "default1000", "all"],
         default="default100",
         help=(
             "Class subset preset. 'default100' uses [0,2,4,...,198]. "
+            "'default1000' uses [0,2,4,...,1998] (capped by available classes). "
             "'all' uses every class available in dataset metadata."
         ),
     )
@@ -180,9 +182,6 @@ def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
         raise ValueError(
             f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
         )
-    if class_subset == "default100":
-        return DEFAULT_CLASS_INDICES
-
     metadata_path = dataset_root / "THINGS_EEG_2" / "image_metadata.npy"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Image metadata not found: {metadata_path}")
@@ -197,7 +196,13 @@ def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
             f"got {num_images} and {images_per_class}."
         )
     num_classes = num_images // images_per_class
-    return list(range(num_classes))
+    if class_subset == "all":
+        return list(range(num_classes))
+    if class_subset == "default100":
+        requested = DEFAULT_CLASS_INDICES
+    else:
+        requested = DEFAULT_CLASS_INDICES_1000
+    return [idx for idx in requested if int(idx) < int(num_classes)]
 
 
 def _build_split_info(

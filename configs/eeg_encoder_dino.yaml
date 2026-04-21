@@ -1,12 +1,12 @@
 # Data
 dataset_root: datasets
 # Directory containing DINO latent targets.
-image_latent_root: latents/img_dino_pca_256
+image_latent_root: latents/img_dino_pca_128
 subject: sub-1
 split_seed: 0
 
 # Match DINO latent target dimensionality (PCA k by default).
-output_dim: 256
+output_dim: 128
 
 # Optimization
 batch_size: 16
@@ -18,6 +18,8 @@ epochs: 15
 # Runtime/output
 device: auto
 output_dir: outputs/eeg_encoder_dino
+# Freeform note about what changed since the last run; saved as a .txt artifact per run.
+run_change_note: "Changed loss from MSE to cosine"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -33,7 +35,8 @@ averaging_mode: all
 
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]
+# - default1000: classes [0,2,4,...,1998] (capped by available classes)
 # - all: use every class available in the dataset
-class_subset: default100
+class_subset: default1000
 # Optional explicit override (takes precedence over class_subset when provided):
 # class_indices: [0, 1, 2, 3]
