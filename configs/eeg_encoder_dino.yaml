@@ -1,12 +1,12 @@
 # Data
 dataset_root: datasets
 # Directory containing DINO latent targets.
-image_latent_root: latents/img_dino_pca_256
+image_latent_root: latents/img_dino_pca_128
 subject: sub-1
 split_seed: 0
 
 # Match DINO latent target dimensionality (PCA k by default).
-output_dim: 256
+output_dim: 128
 
 # Optimization
 batch_size: 16
@@ -23,6 +23,11 @@ eval_max_samples: 16
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
 eeg_normalization: zscore
 eeg_zscore_eps: 1.0e-6
+
+# Optional EEG time-window crop applied at runtime before normalization.
+# Example: keep 50 ms before stimulus through 500 ms after stimulus.
+eeg_window_pre_ms: 50
+eeg_window_post_ms: 500
 
 # EEG repeat averaging:
 # - all: average all repeats per stimulus

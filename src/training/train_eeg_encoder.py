@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 import yaml
 
 from src.data import EEGImageLatentAveragedDataset, EEGImageLatentDataset, build_eeg_transform
+from src.data.transforms import crop_eeg_time_window, resolve_eeg_time_window
 from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
 
 
@@ -132,6 +133,13 @@ class EEGEncoderConfig:
     eeg_normalization: str  # one of: l2, zscore, none
     eeg_zscore_eps: float
     eeg_l2_normalize: bool
+    eeg_window_pre_ms: Optional[float]
+    eeg_window_post_ms: Optional[float]
+    eeg_window_start_idx: Optional[int]
+    eeg_window_end_idx: Optional[int]
+    eeg_window_actual_start_s: Optional[float]
+    eeg_window_actual_end_s: Optional[float]
+    eeg_window_num_timepoints: Optional[int]
     averaging_mode: str  # one of: all, random_k
     k_repeats: Optional[int]
     pin_memory: bool
@@ -220,6 +228,20 @@ def load_eeg_encoder_config(
         raise ValueError("k_repeats must be set when averaging_mode='random_k'.")
     if k_repeats is not None and k_repeats < 1:
         raise ValueError(f"k_repeats must be >= 1 when set, got: {k_repeats}")
+    eeg_window_pre_ms = data.get("eeg_window_pre_ms", None)
+    eeg_window_post_ms = data.get("eeg_window_post_ms", None)
+    if eeg_window_pre_ms is None and eeg_window_post_ms is None:
+        resolved_pre_ms = None
+        resolved_post_ms = None
+    elif eeg_window_pre_ms is None or eeg_window_post_ms is None:
+        raise ValueError(
+            "eeg_window_pre_ms and eeg_window_post_ms must both be set when enabling EEG window cropping."
+        )
+    else:
+        resolved_pre_ms = float(eeg_window_pre_ms)
+        resolved_post_ms = float(eeg_window_post_ms)
+        if resolved_pre_ms < 0 or resolved_post_ms < 0:
+            raise ValueError("eeg_window_pre_ms and eeg_window_post_ms must be non-negative.")
 
     output_dim = int(data["output_dim"])
     raw_latent_root = data.get("image_latent_root", data.get("latent_root"))
@@ -238,6 +260,33 @@ def load_eeg_encoder_config(
         class_indices=(tuple(int(x) for x in class_indices) if class_indices is not None else None),
         eeg_normalization=eeg_normalization,
         eeg_zscore_eps=float(data["eeg_zscore_eps"]),
+        eeg_window_pre_ms=resolved_pre_ms,
+        eeg_window_post_ms=resolved_post_ms,
+        eeg_window_start_idx=(
+            int(data["eeg_window_start_idx"])
+            if data.get("eeg_window_start_idx", None) is not None
+            else None
+        ),
+        eeg_window_end_idx=(
+            int(data["eeg_window_end_idx"])
+            if data.get("eeg_window_end_idx", None) is not None
+            else None
+        ),
+        eeg_window_actual_start_s=(
+            float(data["eeg_window_actual_start_s"])
+            if data.get("eeg_window_actual_start_s", None) is not None
+            else None
+        ),
+        eeg_window_actual_end_s=(
+            float(data["eeg_window_actual_end_s"])
+            if data.get("eeg_window_actual_end_s", None) is not None
+            else None
+        ),
+        eeg_window_num_timepoints=(
+            int(data["eeg_window_num_timepoints"])
+            if data.get("eeg_window_num_timepoints", None) is not None
+            else None
+        ),
         averaging_mode=averaging_mode,
         k_repeats=k_repeats,
         output_dim=output_dim,
@@ -256,6 +305,49 @@ def load_eeg_encoder_config(
             else None
         ),
     )
+
+
+def _resolve_eeg_window_config(config: EEGEncoderConfig) -> Optional[dict[str, Any]]:
+    if config.eeg_window_pre_ms is None and config.eeg_window_post_ms is None:
+        config.eeg_window_start_idx = None
+        config.eeg_window_end_idx = None
+        config.eeg_window_actual_start_s = None
+        config.eeg_window_actual_end_s = None
+        config.eeg_window_num_timepoints = None
+        return None
+
+    dataset = EEGImageLatentDataset(
+        dataset_root=config.dataset_root,
+        latent_root=config.latent_root,
+        subject=config.subject,
+        split="train",
+        class_indices=config.class_indices,
+        transform=None,
+        split_seed=config.split_seed,
+    )
+    window = resolve_eeg_time_window(
+        dataset.times,
+        pre_ms=config.eeg_window_pre_ms,
+        post_ms=config.eeg_window_post_ms,
+    )
+    config.eeg_window_start_idx = int(window["start_idx"])
+    config.eeg_window_end_idx = int(window["end_idx"])
+    config.eeg_window_actual_start_s = float(window["actual_start_s"])
+    config.eeg_window_actual_end_s = float(window["actual_end_s"])
+    config.eeg_window_num_timepoints = int(window["num_timepoints"])
+    return window
+
+
+def _get_eeg_transform_kwargs(config: EEGEncoderConfig) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if config.eeg_window_start_idx is not None or config.eeg_window_end_idx is not None:
+        if config.eeg_window_start_idx is None or config.eeg_window_end_idx is None:
+            raise ValueError(
+                "eeg_window_start_idx and eeg_window_end_idx must both be set when EEG cropping is enabled."
+            )
+        kwargs["crop_start_idx"] = int(config.eeg_window_start_idx)
+        kwargs["crop_end_idx"] = int(config.eeg_window_end_idx)
+    return kwargs
 
 
 def _make_loader(config: EEGEncoderConfig, split: str, shuffle: bool, drop_last: bool) -> DataLoader:
@@ -277,6 +369,7 @@ def _make_loader_with_stats(
 ) -> DataLoader:
     # Safe to change transform composition here, but keep train/eval aligned.
     normalize_mode = str(config.eeg_normalization).lower()
+    eeg_transform_kwargs = _get_eeg_transform_kwargs(config)
     if normalize_mode == "zscore":
         if eeg_zscore_stats is None:
             raise ValueError("zscore normalization selected but stats were not provided.")
@@ -286,11 +379,13 @@ def _make_loader_with_stats(
             zscore_std=eeg_zscore_stats["std"],
             zscore_eps=float(eeg_zscore_stats.get("eps", config.eeg_zscore_eps)),
             to_tensor=True,
+            **eeg_transform_kwargs,
         )
     else:
         eeg_transform = build_eeg_transform(
             normalize_mode=normalize_mode,
             to_tensor=True,
+            **eeg_transform_kwargs,
         )
     dataset = EEGImageLatentAveragedDataset(
         dataset_root=config.dataset_root,
@@ -328,6 +423,16 @@ def _compute_train_eeg_channel_stats(config: EEGEncoderConfig) -> dict[str, Any]
     eeg_train = np.asarray(dataset.eeg[train_image_indices], dtype=np.float32)  # [Nimg, R, C, T]
     if eeg_train.ndim != 4:
         raise ValueError(f"Expected train EEG block [N, R, C, T], got {tuple(eeg_train.shape)}")
+    if config.eeg_window_start_idx is not None or config.eeg_window_end_idx is not None:
+        if config.eeg_window_start_idx is None or config.eeg_window_end_idx is None:
+            raise ValueError(
+                "eeg_window_start_idx and eeg_window_end_idx must both be set when EEG cropping is enabled."
+            )
+        eeg_train = crop_eeg_time_window(
+            eeg_train,
+            start_idx=int(config.eeg_window_start_idx),
+            end_idx=int(config.eeg_window_end_idx),
+        )
     eeg_train = eeg_train.reshape(-1, eeg_train.shape[2], eeg_train.shape[3])  # [Nimg*R, C, T]
     mean = eeg_train.mean(axis=(0, 2), dtype=np.float64).astype(np.float32)  # [C]
     std = eeg_train.std(axis=(0, 2), dtype=np.float64).astype(np.float32)  # [C]
@@ -453,6 +558,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    eeg_window = _resolve_eeg_window_config(config=config)
     eeg_zscore_stats = None
     if str(config.eeg_normalization).lower() == "zscore":
         eeg_zscore_stats = _compute_train_eeg_channel_stats(config=config)
@@ -518,6 +624,14 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     print(f"EEG sample shape: ({eeg_channels}, {eeg_timesteps})")
     print(f"Latent target dim: {target_dim}")
     print(f"EEG normalization: {config.eeg_normalization}")
+    if eeg_window is None:
+        print("EEG time window: full epoch")
+    else:
+        print(
+            "EEG time window: "
+            f"{config.eeg_window_actual_start_s:.3f}s to {config.eeg_window_actual_end_s:.3f}s "
+            f"({config.eeg_window_num_timepoints} timepoints)"
+        )
 
     history = {"train_loss": [], "train_eval_loss": [], "valid_loss": []}
     for epoch in range(1, config.epochs + 1):

@@ -230,6 +230,17 @@ def build_eeg_transform_from_saved_cfg(saved_cfg: dict):
     normalize_mode = str(saved_cfg.get("eeg_normalization", "")).lower()
     if not normalize_mode:
         normalize_mode = "l2" if bool(saved_cfg.get("eeg_l2_normalize", True)) else "none"
+    eeg_transform_kwargs = {}
+    crop_start_idx = saved_cfg.get("eeg_window_start_idx")
+    crop_end_idx = saved_cfg.get("eeg_window_end_idx")
+    if crop_start_idx is not None or crop_end_idx is not None:
+        if crop_start_idx is None or crop_end_idx is None:
+            raise KeyError(
+                "Checkpoint config has partial EEG crop metadata; expected both "
+                "'eeg_window_start_idx' and 'eeg_window_end_idx'."
+            )
+        eeg_transform_kwargs["crop_start_idx"] = int(crop_start_idx)
+        eeg_transform_kwargs["crop_end_idx"] = int(crop_end_idx)
 
     if normalize_mode == "zscore":
         mean = saved_cfg.get("eeg_zscore_mean")
@@ -246,11 +257,13 @@ def build_eeg_transform_from_saved_cfg(saved_cfg: dict):
             zscore_std=std,
             zscore_eps=eps,
             to_tensor=True,
+            **eeg_transform_kwargs,
         )
 
     return build_eeg_transform(
         normalize_mode=normalize_mode,
         to_tensor=True,
+        **eeg_transform_kwargs,
     )
 
 

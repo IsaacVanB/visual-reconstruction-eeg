@@ -50,6 +50,8 @@ class EEGImageDataset(Dataset):
         self.image_transform = image_transform
         self.return_image_name = return_image_name
         self.split_seed = split_seed
+        self.times = None
+        self.ch_names = None
 
         eeg_path = os.path.join(
             self.dataset_root, "THINGS_EEG_2", self.subject, "preprocessed_eeg_training.npy"
@@ -78,9 +80,24 @@ class EEGImageDataset(Dataset):
                         ) from exc
 
         if isinstance(self.eeg, dict):
+            self.times = np.asarray(self.eeg.get("times")) if "times" in self.eeg else None
+            self.ch_names = (
+                np.asarray(self.eeg.get("ch_names")).tolist()
+                if "ch_names" in self.eeg
+                else None
+            )
             if "preprocessed_eeg_data" not in self.eeg:
                 raise KeyError("Expected key 'preprocessed_eeg_data' in EEG dict.")
             self.eeg = self.eeg["preprocessed_eeg_data"]
+
+        if self.times is None:
+            if not isinstance(self.eeg, np.ndarray) or self.eeg.ndim != 4:
+                raise ValueError(
+                    "Expected EEG array with shape (images, repetitions, channels, timepoints) "
+                    f"before constructing fallback times; got {type(self.eeg)} with "
+                    f"shape {getattr(self.eeg, 'shape', None)}"
+                )
+            self.times = np.arange(self.eeg.shape[-1], dtype=np.float32)
 
         img_metadata_path = os.path.join(self.dataset_root, "THINGS_EEG_2", "image_metadata.npy")
         if not os.path.exists(img_metadata_path):
@@ -93,6 +110,11 @@ class EEGImageDataset(Dataset):
         self.image_root = os.path.join(self.dataset_root, "images_THINGS", "object_images")
         if self.eeg.ndim != 4 or self.eeg.shape[1:] != (4, 17, 100):
             raise ValueError("Expected EEG shape (16540, 4, 17, 100); " f"got {self.eeg.shape}")
+        if self.times.shape[0] != self.eeg.shape[-1]:
+            raise ValueError(
+                "EEG times length does not match last EEG dimension: "
+                f"{self.times.shape[0]} vs {self.eeg.shape[-1]}"
+            )
 
         self.num_images = self.eeg.shape[0]
         self.repetitions = self.eeg.shape[1]

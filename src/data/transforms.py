@@ -55,6 +55,75 @@ class EEGChannelZScoreNormalize:
         return (eeg_np - self.mean) / self.std
 
 
+def resolve_eeg_time_window(
+    times,
+    pre_ms: Optional[float] = None,
+    post_ms: Optional[float] = None,
+) -> Optional[dict]:
+    if pre_ms is None and post_ms is None:
+        return None
+    if pre_ms is None or post_ms is None:
+        raise ValueError("Both pre_ms and post_ms must be provided when cropping EEG windows.")
+
+    times_np = np.asarray(times, dtype=np.float32).reshape(-1)
+    if times_np.ndim != 1 or times_np.size == 0:
+        raise ValueError("Expected a non-empty 1D `times` array.")
+    if pre_ms < 0 or post_ms < 0:
+        raise ValueError("pre_ms and post_ms must be non-negative.")
+
+    start_s = -float(pre_ms) / 1000.0
+    end_s = float(post_ms) / 1000.0
+    tolerance = 1e-6
+    keep_indices = np.where(
+        (times_np >= start_s - tolerance) & (times_np <= end_s + tolerance)
+    )[0]
+    if keep_indices.size == 0:
+        raise ValueError(
+            f"No EEG timepoints found in requested window [{start_s:.6f}, {end_s:.6f}] seconds."
+        )
+
+    start_idx = int(keep_indices[0])
+    end_idx = int(keep_indices[-1])
+    selected_times = times_np[start_idx : end_idx + 1]
+    return {
+        "pre_ms": float(pre_ms),
+        "post_ms": float(post_ms),
+        "start_idx": start_idx,
+        "end_idx": end_idx,
+        "requested_start_s": float(start_s),
+        "requested_end_s": float(end_s),
+        "actual_start_s": float(selected_times[0]),
+        "actual_end_s": float(selected_times[-1]),
+        "num_timepoints": int(selected_times.size),
+    }
+
+
+def crop_eeg_time_window(eeg, start_idx: int, end_idx: int):
+    eeg_np = np.asarray(eeg, dtype=np.float32)
+    if eeg_np.ndim < 2:
+        raise ValueError(f"Expected EEG array with at least 2 dims, got shape {tuple(eeg_np.shape)}")
+    time_dim = eeg_np.shape[-1]
+    if start_idx < 0 or end_idx < start_idx or end_idx >= time_dim:
+        raise IndexError(
+            f"Invalid EEG time window [{start_idx}, {end_idx}] for time dimension {time_dim}."
+        )
+    return eeg_np[..., start_idx : end_idx + 1]
+
+
+class EEGTimeWindowCrop:
+    """Crop EEG sample [C, T] to a configured time window."""
+
+    def __init__(self, start_idx: int, end_idx: int) -> None:
+        self.start_idx = int(start_idx)
+        self.end_idx = int(end_idx)
+
+    def __call__(self, eeg):
+        eeg_np = np.asarray(eeg, dtype=np.float32)
+        if eeg_np.ndim != 2:
+            raise ValueError(f"Expected EEG sample [C, T], got shape {tuple(eeg_np.shape)}")
+        return crop_eeg_time_window(eeg_np, start_idx=self.start_idx, end_idx=self.end_idx)
+
+
 class EEGToTensor:
     def __call__(self, eeg):
         if isinstance(eeg, torch.Tensor):
@@ -110,8 +179,15 @@ def build_eeg_transform(
     zscore_mean=None,
     zscore_std=None,
     zscore_eps: float = 1e-6,
+    crop_start_idx: int | None = None,
+    crop_end_idx: int | None = None,
 ) -> Compose:
     transforms = []
+    if crop_start_idx is not None or crop_end_idx is not None:
+        if crop_start_idx is None or crop_end_idx is None:
+            raise ValueError("Both crop_start_idx and crop_end_idx must be set together.")
+        transforms.append(EEGTimeWindowCrop(start_idx=crop_start_idx, end_idx=crop_end_idx))
+
     if normalize_mode is None:
         normalize_mode = "l2" if normalize_per_sample else "none"
     normalize_mode = str(normalize_mode).lower()
