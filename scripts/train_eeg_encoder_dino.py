@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument("--image-latent-root")
     parser.add_argument("--latent-root")
     parser.add_argument("--subject")
-    parser.add_argument("--class-subset", choices=["default100", "all"])
+    parser.add_argument("--class-subset", choices=["default100", "default1000", "all"])
     parser.add_argument("--class-indices", type=int, nargs="+")
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--output-dim", type=int)
