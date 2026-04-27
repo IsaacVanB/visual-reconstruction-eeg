@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 import sys
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -10,10 +11,11 @@ from omegaconf import OmegaConf
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 
-from src.data import EEGImageLatentDataset
+from src.data import EEGImageLatentAveragedDataset, EEGImageLatentDataset
 from src.evaluation.eeg_eval_core import (
     build_eeg_transform_from_saved_cfg,
     build_model_for_checkpoint,
+    filter_image_indices_to_existing_files,
     filter_sample_index_to_existing_files,
     find_latest_run_dir,
     inverse_pca_prediction,
@@ -85,6 +87,25 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-samples", type=int, default=None, help="Optional cap for quick runs.")
     parser.add_argument("--num-images", type=int, default=None, help="Alias for --max-samples.")
+    parser.add_argument(
+        "--averaging-mode",
+        default="auto",
+        choices=["auto", "none", "all", "random_k"],
+        help=(
+            "EEG repeat handling for evaluation. "
+            "'auto' uses checkpoint config averaging_mode; "
+            "'none' uses per-trial EEG; 'all'/'random_k' use averaged dataset."
+        ),
+    )
+    parser.add_argument(
+        "--k-repeats",
+        type=int,
+        default=None,
+        help=(
+            "k for averaging_mode='random_k'. If omitted, uses checkpoint config k_repeats. "
+            "For split=test, random_k still averages all repeats by dataset design."
+        ),
+    )
     parser.add_argument(
         "--grid-images",
         type=int,
@@ -277,21 +298,95 @@ def _build_reconstruction_grid(
     return Image.fromarray(canvas)
 
 
-def _iter_eeg_label_batches(dataset: EEGImageLatentDataset, batch_size: int):
-    total = len(dataset._sample_index)
+def _resolve_eval_averaging(saved_cfg: dict, args: argparse.Namespace) -> tuple[str, int | None]:
+    cli_mode = str(args.averaging_mode).lower()
+    if cli_mode == "auto":
+        mode = str(saved_cfg.get("averaging_mode", "none")).lower()
+        if mode not in {"none", "all", "random_k"}:
+            mode = "none"
+    else:
+        mode = cli_mode
+
+    if mode == "none":
+        return mode, None
+
+    k_repeats = args.k_repeats
+    if k_repeats is None:
+        saved_k = saved_cfg.get("k_repeats", None)
+        if saved_k is not None:
+            k_repeats = int(saved_k)
+    if mode == "random_k" and k_repeats is None:
+        raise ValueError(
+            "k_repeats is required for averaging_mode='random_k'. "
+            "Pass --k-repeats or use a checkpoint that saved k_repeats."
+        )
+    return mode, k_repeats
+
+
+def _iter_eeg_label_batches(dataset: Any, batch_size: int):
+    if hasattr(dataset, "_avg_sample_index"):
+        sample_index = dataset._avg_sample_index
+        total = len(sample_index)
+        averaged = True
+    elif hasattr(dataset, "_sample_index"):
+        sample_index = dataset._sample_index
+        total = len(sample_index)
+        averaged = False
+    else:
+        raise TypeError("Unsupported dataset type: expected per-trial or averaged EEG latent dataset.")
+
     for start in range(0, total, batch_size):
-        batch_samples = dataset._sample_index[start: start + batch_size]
+        batch_samples = sample_index[start: start + batch_size]
         eeg_batch = []
         labels = []
-        for image_index, rep_index in batch_samples:
-            eeg_sample = dataset.eeg[image_index, rep_index]
-            if dataset.transform:
-                eeg_sample = dataset.transform(eeg_sample)
-            if not torch.is_tensor(eeg_sample):
-                eeg_sample = torch.as_tensor(eeg_sample)
-            eeg_batch.append(eeg_sample)
-            labels.append(int(image_index) // int(dataset.images_per_class))
-        yield torch.stack(eeg_batch, dim=0), torch.tensor(labels, dtype=torch.long), batch_samples
+        sample_meta: list[tuple[int, int | None]] = []
+        if averaged:
+            for image_index in batch_samples:
+                image_index = int(image_index)
+                eeg_sample = dataset._average_repeats(image_index)
+                if dataset.transform:
+                    eeg_sample = dataset.transform(eeg_sample)
+                if not torch.is_tensor(eeg_sample):
+                    eeg_sample = torch.as_tensor(eeg_sample)
+                eeg_batch.append(eeg_sample)
+                labels.append(int(image_index) // int(dataset.images_per_class))
+                sample_meta.append((image_index, None))
+        else:
+            for image_index, rep_index in batch_samples:
+                eeg_sample = dataset.eeg[image_index, rep_index]
+                if dataset.transform:
+                    eeg_sample = dataset.transform(eeg_sample)
+                if not torch.is_tensor(eeg_sample):
+                    eeg_sample = torch.as_tensor(eeg_sample)
+                eeg_batch.append(eeg_sample)
+                labels.append(int(image_index) // int(dataset.images_per_class))
+                sample_meta.append((int(image_index), int(rep_index)))
+        yield torch.stack(eeg_batch, dim=0), torch.tensor(labels, dtype=torch.long), sample_meta
+
+
+def _load_first_eeg_sample_for_model_build(dataset: Any) -> torch.Tensor:
+    if hasattr(dataset, "_avg_sample_index"):
+        first_image_index = int(dataset._avg_sample_index[0])
+        sample_eeg = dataset._average_repeats(first_image_index)
+    elif hasattr(dataset, "_sample_index"):
+        first_image_index, first_rep_index = dataset._sample_index[0]
+        sample_eeg = dataset.eeg[first_image_index, first_rep_index]
+    else:
+        raise TypeError("Unsupported dataset type for model-shape sample extraction.")
+
+    if dataset.transform:
+        sample_eeg = dataset.transform(sample_eeg)
+    if not torch.is_tensor(sample_eeg):
+        sample_eeg = torch.as_tensor(sample_eeg)
+    return sample_eeg
+
+
+def _sample_count(dataset: Any) -> int:
+    if hasattr(dataset, "_avg_sample_index"):
+        return len(dataset._avg_sample_index)
+    if hasattr(dataset, "_sample_index"):
+        return len(dataset._sample_index)
+    return len(dataset)
 
 
 def main():
@@ -329,27 +424,52 @@ def main():
         class_indices=args.class_indices,
     )
 
+    eval_averaging_mode, eval_k_repeats = _resolve_eval_averaging(saved_cfg=saved_cfg, args=args)
+
     eeg_tf = build_eeg_transform_from_saved_cfg(saved_cfg)
-    dataset = EEGImageLatentDataset(
-        dataset_root=dataset_root,
-        subject=subject,
-        split="test",
-        class_indices=class_indices,
-        transform=eeg_tf,
-        latent_root=latent_root,
-        split_seed=split_seed,
-    )
+    if eval_averaging_mode == "none":
+        dataset = EEGImageLatentDataset(
+            dataset_root=dataset_root,
+            subject=subject,
+            split="test",
+            class_indices=class_indices,
+            transform=eeg_tf,
+            latent_root=latent_root,
+            split_seed=split_seed,
+        )
+    else:
+        dataset = EEGImageLatentAveragedDataset(
+            dataset_root=dataset_root,
+            subject=subject,
+            split="test",
+            class_indices=class_indices,
+            transform=eeg_tf,
+            latent_root=latent_root,
+            split_seed=split_seed,
+            averaging_mode=eval_averaging_mode,
+            k_repeats=eval_k_repeats,
+        )
     image_root = Path(dataset_root) / "images_THINGS" / "object_images"
     if not image_root.exists():
         raise FileNotFoundError(f"Image root not found: {image_root}")
 
-    filtered_samples, missing_test_images = filter_sample_index_to_existing_files(
-        sample_index=dataset._sample_index,
-        train_img_files=dataset.train_img_files,
-        image_root=image_root,
-    )
+    if eval_averaging_mode == "none":
+        filtered_samples, missing_test_images = filter_sample_index_to_existing_files(
+            sample_index=dataset._sample_index,
+            train_img_files=dataset.train_img_files,
+            image_root=image_root,
+        )
+    else:
+        filtered_image_indices, missing_test_images = filter_image_indices_to_existing_files(
+            image_indices=dataset._avg_sample_index,
+            train_img_files=dataset.train_img_files,
+            image_root=image_root,
+        )
     if missing_test_images:
-        dataset._sample_index = filtered_samples
+        if eval_averaging_mode == "none":
+            dataset._sample_index = filtered_samples
+        else:
+            dataset._avg_sample_index = filtered_image_indices
         print(
             "Warning: Skipping test samples with missing ground-truth images: "
             f"{len(missing_test_images)} image ids removed."
@@ -357,14 +477,9 @@ def main():
     if len(dataset) == 0:
         raise RuntimeError("No test samples remain after filtering missing ground-truth images.")
 
-    if len(dataset._sample_index) == 0:
+    if _sample_count(dataset) == 0:
         raise RuntimeError("No test samples remain after filtering.")
-    first_image_index, first_rep_index = dataset._sample_index[0]
-    sample_eeg = dataset.eeg[first_image_index, first_rep_index]
-    if dataset.transform:
-        sample_eeg = dataset.transform(sample_eeg)
-    if not torch.is_tensor(sample_eeg):
-        sample_eeg = torch.as_tensor(sample_eeg)
+    sample_eeg = _load_first_eeg_sample_for_model_build(dataset=dataset)
     sample_latent = torch.zeros(int(saved_cfg.get("output_dim", 128)), dtype=torch.float32)
     model = build_model_for_checkpoint(
         model_state_dict=ckpt["model_state_dict"],
@@ -435,6 +550,9 @@ def main():
     print(f"PCA shape: k={pca['k']}, D={pca['d']}")
     print(f"PCA standardized: {pca['standardized']}")
     print(f"Output mode: {args.output_mode}")
+    print(f"Eval averaging mode: {eval_averaging_mode}")
+    if eval_averaging_mode == "random_k":
+        print(f"Eval k_repeats: {eval_k_repeats}")
     print(f"Missing keys when loading SAE checkpoint: {len(missing_keys)}")
     print(f"Unexpected keys when loading SAE checkpoint: {len(unexpected_keys)}")
 
@@ -475,9 +593,10 @@ def main():
                     break
                 image_index, rep_index = batch_samples[j]
                 label = int(labels[j].item())
+                rep_tag = f"{int(rep_index)}" if rep_index is not None else "avg"
                 out_name = (
                     f"label_{label:04d}_img_{int(image_index):06d}_"
-                    f"rep_{int(rep_index)}.png"
+                    f"rep_{rep_tag}.png"
                 )
                 _tensor_to_pil(recon_01[j]).save(output_dir / out_name)
                 if len(originals_for_grid) < args.grid_images:

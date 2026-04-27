@@ -21,7 +21,7 @@ cosine_loss_weight: 0.5
 device: auto
 output_dir: outputs/eeg_encoder_dino
 # Freeform note about what changed since the last run; saved as a .txt artifact per run.
-run_change_note: "Changed to combined MSE and cosine loss"
+run_change_note: "Using 0-500 ms window"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -30,7 +30,7 @@ eeg_zscore_eps: 1.0e-6
 
 # Optional EEG time-window crop applied at runtime before normalization.
 # Example: keep 50 ms before stimulus through 500 ms after stimulus.
-eeg_window_pre_ms: 50
+eeg_window_pre_ms: 0
 eeg_window_post_ms: 500
 
 # EEG repeat averaging:
