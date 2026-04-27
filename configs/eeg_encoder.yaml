@@ -1,0 +1,39 @@
+# Data
+dataset_root: datasets
+image_latent_root: latents/img_pca_8
+subject: sub-1
+split_seed: 0
+
+# Match latent PCA dimensionality.
+output_dim: 64
+
+# Optimization
+batch_size: 16
+num_workers: 0
+lr: 0.0001
+weight_decay: 0.001
+epochs: 15
+
+# Runtime/output
+device: auto
+output_dir: outputs/eeg_encoder
+eval_max_samples: 16
+
+# EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
+eeg_normalization: zscore
+eeg_zscore_eps: 1.0e-6
+
+# EEG repeat averaging:
+# - all: average all repeats per stimulus
+# - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
+averaging_mode: all
+# Required when averaging_mode: random_k
+# k_repeats: 2
+
+# Subset experiment control:
+# - default100: classes [0,2,4,...,198]
+# - default1000: classes [0,2,4,...,1998] (capped by available classes)
+# - all: use every class available in the dataset
+class_subset: default1000
+# Optional explicit override (takes precedence over class_subset when provided):
+# class_indices: [0, 1, 2, 3]

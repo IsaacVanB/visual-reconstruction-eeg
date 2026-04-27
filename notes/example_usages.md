@@ -1,46 +1,47 @@
 # Example Usages
 
 This file documents active, tracked code paths for the current DINO-based pipeline.
+Class subset presets supported in this pipeline:
+- `default100`: classes `[0, 2, 4, ..., 198]`
+- `default1000`: classes `[0, 2, 4, ..., 1998]` (capped by available classes)
+- `all`: all classes available in dataset metadata
 
 ## Minimum Runbook
 
-1) Extract DINO targets (full + PCA-128 with standardization):
+1) Extract VAE targets (full + PCA-128 with standardization):
 ```bash
-python scripts/dino_extract_image_embeds.py \
+python scripts/vae_extract_image_embeds.py \
   --dataset-root datasets \
   --output-root latents \
   --embedding-type both \
-  --full-dir-name img_dino_full \
-  --pca-dir-name img_dino_pca_128 \
+  --full-dir-name img_full \
+  --pca-dir-name img_pca_128 \
   --n-components 128 \
   --standardize-pca \
   --pca-scope train \
-  --dino-repo-root dino-sae \
-  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
-  --image-size 256 \
+  --vae-name stabilityai/sd-vae-ft-mse \
+  --image-size 512 \
   --class-subset all \
   --split-seed 0 \
   --device cuda
 ```
 
-2) Train + run DINO reconstruction eval + SSIM/LPIPS baseline eval:
+2) Train + run VAE reconstruction eval + SSIM/LPIPS baseline eval:
 ```bash
-bash scripts/run_eeg_encoder_dino_experiment.sh \
-  --config configs/eeg_encoder_dino.yaml \
+bash scripts/run_eeg_encoder_experiment.sh \
+  --config configs/eeg_encoder.yaml \
   --eval --max-samples 16 --grid-images 8 \
-  --baseline --output-mode zero_one --image-size 256
+  --baseline --image-size 512
 ```
 
 3) (Optional) Reconstruct one PCA latent directly for debugging:
 ```bash
-python scripts/dino_latent_reconstruct.py \
-  --latent-path latents/img_dino_pca_128/000000.pt \
-  --pca-params-path latents/img_dino_pca_128/pca_128.pt \
-  --latent-shape 1024 16 16 \
-  --output-path outputs/dino_recon_debug.png \
-  --dino-repo-root dino-sae \
-  --sae-checkpoint dino-sae/ema_model_step_470000.pt \
-  --output-mode zero_one \
+python scripts/vae_latent_decode.py \
+  --latent-path latents/img_pca_128/000000.pt \
+  --pca-params-path latents/img_pca_128/pca_128.pt \
+  --latent-shape 4 64 64 \
+  --metadata-path latents/img_full_metadata.json \
+  --output-path outputs/vae_recon_debug.png \
   --device cuda
 ```
 
@@ -95,6 +96,7 @@ python scripts/train_eeg_encoder_dino.py \
   --config configs/eeg_encoder_dino.yaml \
   --dataset-root datasets \
   --latent-root latents/img_dino_pca_128 \
+  --class-subset default1000 \
   --output-dim 128 \
   --epochs 20 \
   --output-dir outputs/eeg_encoder_dino \
@@ -116,6 +118,7 @@ Compute summary stats over latent targets for train/valid split.
 python scripts/pca_target_stats.py \
   --dataset-root datasets \
   --latent-root latents/img_dino_pca_128 \
+  --class-subset default1000 \
   --split-seed 0 \
   --output-path outputs/pca_target_stats_dino.json
 ```
