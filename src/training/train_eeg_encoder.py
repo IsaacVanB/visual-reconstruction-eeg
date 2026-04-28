@@ -533,10 +533,16 @@ def _save_artifacts(
     config: EEGEncoderConfig,
     history: dict[str, list[float]],
     model: EEGEncoderCNN,
+    best_model_state_dict: Optional[dict[str, torch.Tensor]] = None,
+    best_epoch: Optional[int] = None,
+    best_valid_loss: Optional[float] = None,
     eeg_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> dict[str, Path]:
     saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Final checkpoint: weights from the last training epoch.
     ckpt_path = output_dir / f"eeg_encoder_{saved_at}.pt"
+    # Best checkpoint: weights from epoch with lowest validation loss.
+    best_ckpt_path = output_dir / f"eeg_encoder_best_{saved_at}.pt"
     arch_metadata = extract_eeg_encoder_cnn_arch_metadata(model)
     model_architecture_name = model.__class__.__name__
     config_payload = dict(config.__dict__)
@@ -558,6 +564,21 @@ def _save_artifacts(
         },
         ckpt_path,
     )
+    if best_model_state_dict is not None:
+        torch.save(
+            {
+                "model_state_dict": best_model_state_dict,
+                "config": config_payload,
+                "class_indices": list(config.class_indices) if config.class_indices is not None else None,
+                "model_architecture": model_architecture_name,
+                "model_architecture_params": arch_metadata,
+                "eeg_zscore_stats": eeg_zscore_stats,
+                "saved_at": saved_at,
+                "best_epoch": int(best_epoch) if best_epoch is not None else None,
+                "best_valid_loss": float(best_valid_loss) if best_valid_loss is not None else None,
+            },
+            best_ckpt_path,
+        )
 
     metrics_path = output_dir / f"metrics_history_{saved_at}.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
@@ -596,6 +617,7 @@ def _save_artifacts(
 
     return {
         "checkpoint": ckpt_path,
+        "best_checkpoint": best_ckpt_path,
         "curves": curve_path,
         "metrics": metrics_path,
         "summary": summary_path,
@@ -688,6 +710,9 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         )
 
     history = {"train_loss": [], "train_eval_loss": [], "valid_loss": []}
+    best_valid_loss = float("inf")
+    best_epoch = 0
+    best_model_state_dict: Optional[dict[str, torch.Tensor]] = None
     for epoch in range(1, config.epochs + 1):
         train_metrics = _run_epoch(
             model=model,
@@ -716,6 +741,12 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         history["train_loss"].append(train_metrics["loss"])
         history["train_eval_loss"].append(train_eval_metrics["loss"])
         history["valid_loss"].append(valid_metrics["loss"])
+        if valid_metrics["loss"] < best_valid_loss:
+            best_valid_loss = float(valid_metrics["loss"])
+            best_epoch = int(epoch)
+            best_model_state_dict = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
         print(
             f"Epoch {epoch}/{config.epochs} | "
             f"train_mse={train_metrics['loss']:.6f} "
@@ -728,9 +759,15 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         config=config,
         history=history,
         model=model,
+        best_model_state_dict=best_model_state_dict,
+        best_epoch=best_epoch if best_epoch > 0 else None,
+        best_valid_loss=best_valid_loss if best_epoch > 0 else None,
         eeg_zscore_stats=eeg_zscore_stats,
     )
     print(f"Saved checkpoint: {artifact_paths['checkpoint']}")
+    print(f"Saved best checkpoint: {artifact_paths['best_checkpoint']}")
+    if best_epoch > 0:
+        print(f"Best valid epoch: {best_epoch} (loss={best_valid_loss:.6f})")
     print(f"Saved curves: {artifact_paths['curves']}")
     print(f"Saved metrics: {artifact_paths['metrics']}")
     print(f"Saved summary: {artifact_paths['summary']}")

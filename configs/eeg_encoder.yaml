@@ -1,11 +1,11 @@
 # Data
 dataset_root: datasets
-image_latent_root: latents/img_pca_8
+image_latent_root: latents/img_pca_4_all
 subject: sub-1
 split_seed: 0
 
 # Match latent PCA dimensionality.
-output_dim: 64
+output_dim: 4
 
 # Optimization
 batch_size: 16
@@ -13,15 +13,24 @@ num_workers: 0
 lr: 0.0001
 weight_decay: 0.001
 epochs: 15
+mse_loss_weight: 0.7
+cosine_loss_weight: 0.3
 
 # Runtime/output
 device: auto
 output_dir: outputs/eeg_encoder
+# Freeform note about what changed since the last run; saved as a .txt artifact per run.
+run_change_note: "Changed PCA dim from 8 to 4 (no change from last run but now I'm saving best.pt)" #"Changes MSE weight = 0.7, cosine = 0.3"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
 eeg_normalization: zscore
 eeg_zscore_eps: 1.0e-6
+
+# Optional EEG time-window crop applied at runtime before normalization.
+# Example: keep 50 ms before stimulus through 500 ms after stimulus.
+eeg_window_pre_ms: 0
+eeg_window_post_ms: 500
 
 # EEG repeat averaging:
 # - all: average all repeats per stimulus
@@ -34,6 +43,6 @@ averaging_mode: all
 # - default100: classes [0,2,4,...,198]
 # - default1000: classes [0,2,4,...,1998] (capped by available classes)
 # - all: use every class available in the dataset
-class_subset: default1000
+class_subset: all
 # Optional explicit override (takes precedence over class_subset when provided):
 # class_indices: [0, 1, 2, 3]

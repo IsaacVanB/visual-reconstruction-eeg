@@ -4,7 +4,7 @@ import sys
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import torch
 
 repo_root = Path(__file__).resolve().parents[2]
@@ -152,18 +152,65 @@ def _tensor_to_uint8_hwc(image_tensor: torch.Tensor) -> np.ndarray:
 
 
 def _build_reconstruction_grid(
-    originals: torch.Tensor, reconstructions: torch.Tensor, max_items: int
+    originals: torch.Tensor,
+    pca_reconstructions: torch.Tensor,
+    pred_reconstructions: torch.Tensor,
+    max_items: int,
 ) -> Image.Image:
-    n = min(max_items, originals.size(0), reconstructions.size(0))
+    n = min(
+        max_items,
+        originals.size(0),
+        pca_reconstructions.size(0),
+        pred_reconstructions.size(0),
+    )
     if n <= 0:
         raise ValueError("No images available to build a reconstruction grid.")
 
     _, _, h, w = originals.shape
-    canvas = np.zeros((2 * h, n * w, 3), dtype=np.uint8)
+    label_w = 96
+    canvas = np.zeros((3 * h, label_w + n * w, 3), dtype=np.uint8)
     for i in range(n):
-        canvas[0:h, i * w : (i + 1) * w] = _tensor_to_uint8_hwc(originals[i])
-        canvas[h : 2 * h, i * w : (i + 1) * w] = _tensor_to_uint8_hwc(reconstructions[i])
-    return Image.fromarray(canvas)
+        x0 = label_w + i * w
+        x1 = label_w + (i + 1) * w
+        canvas[0:h, x0:x1] = _tensor_to_uint8_hwc(originals[i])
+        canvas[h : 2 * h, x0:x1] = _tensor_to_uint8_hwc(pca_reconstructions[i])
+        canvas[2 * h : 3 * h, x0:x1] = _tensor_to_uint8_hwc(pred_reconstructions[i])
+
+    grid = Image.fromarray(canvas)
+    row_labels = ("Ground Truth", "Target (PCA)", "Reconstruction")
+    measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    font = ImageFont.load_default()
+    try:
+        max_size = max(14, min(48, h // 3))
+        for size in range(max_size, 11, -1):
+            trial_font = ImageFont.truetype("DejaVuSans.ttf", size=size)
+            max_text_w = 0
+            max_text_h = 0
+            for label in row_labels:
+                tb = measure_draw.textbbox((0, 0), label, font=trial_font)
+                max_text_w = max(max_text_w, tb[2] - tb[0])
+                max_text_h = max(max_text_h, tb[3] - tb[1])
+            if max_text_w <= (h - 12) and max_text_h <= (label_w - 12):
+                font = trial_font
+                break
+    except OSError:
+        pass
+
+    for row_idx, row_label in enumerate(row_labels):
+        bbox = measure_draw.textbbox((0, 0), row_label, font=font)
+        text_w = max(1, bbox[2] - bbox[0])
+        text_h = max(1, bbox[3] - bbox[1])
+        pad = 6
+        text_img = Image.new("RGBA", (text_w + 2 * pad, text_h + 2 * pad), (0, 0, 0, 0))
+        text_draw = ImageDraw.Draw(text_img)
+        text_draw.text((pad - bbox[0], pad - bbox[1]), row_label, fill=(255, 255, 255, 255), font=font)
+        rotated = text_img.rotate(90, expand=True)
+
+        x = max(0, (label_w - rotated.width) // 2)
+        y = row_idx * h + max(0, (h - rotated.height) // 2)
+        grid.paste(rotated, (x, y), rotated)
+
+    return grid
 
 
 def _resolve_eval_averaging(saved_cfg: dict, args: argparse.Namespace) -> tuple[str, int | None]:
@@ -255,6 +302,46 @@ def _sample_count(dataset: Any) -> int:
     if hasattr(dataset, "_sample_index"):
         return len(dataset._sample_index)
     return len(dataset)
+
+
+def _load_pt(path: Path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def _project_full_latent_to_pca(latent_full: torch.Tensor, pca: dict) -> torch.Tensor:
+    z = latent_full.to(dtype=torch.float32)
+    if z.ndim == 1:
+        z = z.unsqueeze(0)
+    z = z.reshape(z.shape[0], -1)
+    if z.shape[1] != int(pca["d"]):
+        raise ValueError(
+            f"Full latent has D={int(z.shape[1])}, but PCA expects D={int(pca['d'])}."
+        )
+    coeff = (z - pca["mean"].unsqueeze(0)) @ pca["components"].transpose(0, 1)
+    if bool(pca["standardized"]):
+        train_mean = pca["train_mean"]
+        train_std = pca["train_std"]
+        if train_mean is None or train_std is None:
+            raise RuntimeError("Missing PCA standardization stats for forward projection.")
+        coeff = (coeff - train_mean.unsqueeze(0)) / train_std.unsqueeze(0)
+    return coeff
+
+
+def _compute_gt_pca_latent_from_image(
+    gt_01_chw: torch.Tensor,
+    vae,
+    pca: dict,
+    device: torch.device,
+) -> torch.Tensor:
+    x_01 = gt_01_chw.unsqueeze(0).to(device=device, dtype=torch.float32)
+    x_in = x_01 * 2.0 - 1.0
+    posterior = vae.encode(x_in).latent_dist
+    z_full = posterior.mean
+    z_pca = _project_full_latent_to_pca(latent_full=z_full, pca=pca)
+    return z_pca
 
 
 def main():
@@ -408,7 +495,10 @@ def main():
         print(f"Eval k_repeats: {eval_k_repeats}")
     saved = 0
     originals_for_grid = []
+    pca_recons_for_grid = []
     recons_for_grid = []
+    gt_pca_recon_cache: dict[int, torch.Tensor] = {}
+    missing_gt_latent_count = 0
     with torch.no_grad():
         for eeg, labels, batch_samples in _iter_eeg_label_batches(
             dataset=dataset, batch_size=args.batch_size
@@ -457,7 +547,37 @@ def main():
                         width=int(recon_w),
                         height=int(recon_h),
                     )
+                    image_idx_int = int(image_index)
+                    if image_idx_int in gt_pca_recon_cache:
+                        gt_pca_recon = gt_pca_recon_cache[image_idx_int]
+                    else:
+                        try:
+                            latent_path = Path(dataset._resolve_latent_path(image_idx_int))
+                            gt_pca = _load_pt(latent_path)
+                            if not torch.is_tensor(gt_pca):
+                                raise TypeError(
+                                    f"Expected tensor latent at {latent_path}, got {type(gt_pca)}"
+                                )
+                            gt_pca = gt_pca.to(device=device_t, dtype=torch.float32).reshape(1, -1)
+                        except FileNotFoundError:
+                            missing_gt_latent_count += 1
+                            gt_pca = _compute_gt_pca_latent_from_image(
+                                gt_01_chw=gt,
+                                vae=vae,
+                                pca=pca,
+                                device=device_t,
+                            )
+                        gt_pca_recon = decode_from_pca_prediction(
+                            pred_pca=gt_pca,
+                            pca=pca,
+                            latent_shape=(c, h, w),
+                            vae=vae,
+                            scaling_factor=scaling_factor,
+                            decode_scaling_mode=decode_scaling_mode,
+                        )[0].detach().cpu()
+                        gt_pca_recon_cache[image_idx_int] = gt_pca_recon
                     originals_for_grid.append(gt)
+                    pca_recons_for_grid.append(gt_pca_recon)
                     recons_for_grid.append(recon_01[j].detach().cpu())
                 saved += 1
             if args.max_samples is not None and saved >= args.max_samples:
@@ -467,15 +587,22 @@ def main():
 
     if originals_for_grid:
         originals_t = torch.stack(originals_for_grid, dim=0)
+        pca_recons_t = torch.stack(pca_recons_for_grid, dim=0)
         recons_t = torch.stack(recons_for_grid, dim=0)
         grid = _build_reconstruction_grid(
             originals=originals_t,
-            reconstructions=recons_t,
+            pca_reconstructions=pca_recons_t,
+            pred_reconstructions=recons_t,
             max_items=args.grid_images,
         )
         grid_path = output_dir / "recon_grid.png"
         grid.save(grid_path)
         print(f"Saved recon grid: {grid_path}")
+        if missing_gt_latent_count > 0:
+            print(
+                "Grid GT-PCA fallback used VAE+PCA on-the-fly for "
+                f"{missing_gt_latent_count} samples due to missing latent files."
+            )
 
     print(f"Saved decoded images: {saved}")
     print(f"Output directory: {output_dir}")

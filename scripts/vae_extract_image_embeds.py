@@ -33,7 +33,8 @@ warnings.filterwarnings(
 )
 
 DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
-SUPPORTED_CLASS_SUBSETS = {"default100", "all"}
+DEFAULT_CLASS_INDICES_800 = list(range(0, 1600, 2))
+SUPPORTED_CLASS_SUBSETS = {"default100", "default800", "all"}
 
 
 def parse_args():
@@ -67,10 +68,11 @@ def parse_args():
     )
     parser.add_argument(
         "--class-subset",
-        choices=["default100", "all"],
+        choices=["default100", "default800", "all"],
         default="default100",
         help=(
             "Class subset preset. 'default100' uses [0,2,4,...,198]. "
+            "'default800' uses [0,2,4,...,1598]. "
             "'all' uses every class available in dataset metadata."
         ),
     )
@@ -206,14 +208,6 @@ def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
     if args.class_indices is not None:
         return [int(x) for x in args.class_indices]
 
-    class_subset = str(args.class_subset).lower()
-    if class_subset not in SUPPORTED_CLASS_SUBSETS:
-        raise ValueError(
-            f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
-        )
-    if class_subset == "default100":
-        return DEFAULT_CLASS_INDICES
-
     metadata_path = dataset_root / "THINGS_EEG_2" / "image_metadata.npy"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Image metadata not found: {metadata_path}")
@@ -228,6 +222,16 @@ def _resolve_class_indices(dataset_root: Path, args) -> list[int]:
             f"got {num_images} and {images_per_class}."
         )
     num_classes = num_images // images_per_class
+
+    class_subset = str(args.class_subset).lower()
+    if class_subset not in SUPPORTED_CLASS_SUBSETS:
+        raise ValueError(
+            f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
+        )
+    if class_subset == "default100":
+        return [idx for idx in DEFAULT_CLASS_INDICES if idx < num_classes]
+    if class_subset == "default800":
+        return [idx for idx in DEFAULT_CLASS_INDICES_800 if idx < num_classes]
     return list(range(num_classes))
 
 

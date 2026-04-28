@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument("--image-latent-root")
     parser.add_argument("--latent-root")
     parser.add_argument("--subject")
-    parser.add_argument("--class-subset", choices=["default100", "all"])
+    parser.add_argument("--class-subset", choices=["default100", "default1000", "all"])
     parser.add_argument("--class-indices", type=int, nargs="+")
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--output-dim", type=int)
@@ -24,11 +24,16 @@ def parse_args():
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight-decay", type=float)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--mse-loss-weight", type=float)
+    parser.add_argument("--cosine-loss-weight", type=float)
     parser.add_argument("--output-dir")
+    parser.add_argument("--run-change-note")
     parser.add_argument("--device")
     parser.add_argument("--eval-max-samples", type=int)
     parser.add_argument("--eeg-normalization", choices=["l2", "zscore", "none"])
     parser.add_argument("--eeg-zscore-eps", type=float)
+    parser.add_argument("--eeg-window-pre-ms", type=float)
+    parser.add_argument("--eeg-window-post-ms", type=float)
     return parser.parse_args()
 
 
@@ -48,11 +53,16 @@ def main():
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "epochs": args.epochs,
+        "mse_loss_weight": args.mse_loss_weight,
+        "cosine_loss_weight": args.cosine_loss_weight,
         "output_dir": args.output_dir,
+        "run_change_note": args.run_change_note,
         "device": args.device,
         "eval_max_samples": args.eval_max_samples,
         "eeg_normalization": args.eeg_normalization,
         "eeg_zscore_eps": args.eeg_zscore_eps,
+        "eeg_window_pre_ms": args.eeg_window_pre_ms,
+        "eeg_window_post_ms": args.eeg_window_post_ms,
     }
     config = load_eeg_encoder_config(config_path=args.config, overrides=overrides)
     train_eeg_encoder(config)
