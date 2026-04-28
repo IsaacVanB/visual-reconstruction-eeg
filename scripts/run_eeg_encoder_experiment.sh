@@ -141,8 +141,11 @@ else
   fi
 
   # train_eeg_encoder.py saves both final and best checkpoints.
-  # Keep prior behavior by defaulting to the newest final-epoch checkpoint.
-  checkpoint_path="$(ls -1t "$RUN_DIR"/eeg_encoder_[0-9]*.pt 2>/dev/null | head -n 1 || true)"
+  # Default to best checkpoint when available.
+  checkpoint_path="$(ls -1t "$RUN_DIR"/eeg_encoder_best_*.pt 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$checkpoint_path" ]]; then
+    checkpoint_path="$(ls -1t "$RUN_DIR"/eeg_encoder_[0-9]*.pt 2>/dev/null | head -n 1 || true)"
+  fi
   if [[ -z "$checkpoint_path" ]]; then
     checkpoint_path="$(ls -1t "$RUN_DIR"/eeg_encoder.pt 2>/dev/null | head -n 1 || true)"
   fi
