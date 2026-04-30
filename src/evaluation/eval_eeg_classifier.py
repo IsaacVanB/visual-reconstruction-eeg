@@ -18,7 +18,8 @@ sys.path.insert(0, str(repo_root))
 from src.models import EEGClassifier20CNN
 from src.training.train_eeg_classifier import (
     EEGClassifierConfig,
-    _make_loader_with_stats,
+    _discover_all_subjects,
+    _make_subject_loader_with_stats,
 )
 from src.training.train_eeg_encoder import resolve_torch_device
 
@@ -108,6 +109,10 @@ def _config_from_checkpoint(
         config.subjects = tuple(str(subject) for subject in args.subjects)
         if not config.subjects:
             raise ValueError("--subjects must include at least one subject.")
+        if len(config.subjects) == 1 and config.subjects[0].lower() == "all":
+            config.subjects = _discover_all_subjects(config.dataset_root)
+        elif any(subject.lower() == "all" for subject in config.subjects):
+            raise ValueError("Use --subjects all by itself, not mixed with explicit subjects.")
         config.subject = config.subjects[0]
     if args.split_seed is not None:
         config.split_seed = int(args.split_seed)
@@ -208,14 +213,15 @@ def evaluate_eeg_classifier(args: argparse.Namespace) -> dict[str, Any]:
     zscore_stats = _get_zscore_stats(checkpoint=checkpoint, config=config)
     device = resolve_torch_device(config.device)
 
-    loader = _make_loader_with_stats(
+    sample_loader = _make_subject_loader_with_stats(
         config=config,
+        subject=config.subjects[0],
         split=args.split,
         shuffle=False,
         drop_last=False,
         eeg_zscore_stats=zscore_stats,
     )
-    sample_eeg, _sample_image, _sample_label = loader.dataset[0]
+    sample_eeg, _sample_image, _sample_label = sample_loader.dataset[0]
     model = EEGClassifier20CNN(
         eeg_channels=int(sample_eeg.shape[0]),
         eeg_timesteps=int(sample_eeg.shape[1]),
@@ -223,29 +229,42 @@ def evaluate_eeg_classifier(args: argparse.Namespace) -> dict[str, Any]:
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    del sample_loader
 
     y_true = []
     y_pred = []
     y_prob = []
     seen = 0
     with torch.no_grad():
-        for eeg, _images, labels in loader:
+        for subject in config.subjects:
             if args.max_samples is not None and seen >= int(args.max_samples):
                 break
-            if args.max_samples is not None:
-                keep = int(args.max_samples) - seen
-                eeg = eeg[:keep]
-                labels = labels[:keep]
+            loader = _make_subject_loader_with_stats(
+                config=config,
+                subject=subject,
+                split=args.split,
+                shuffle=False,
+                drop_last=False,
+                eeg_zscore_stats=zscore_stats,
+            )
+            for eeg, _images, labels in loader:
+                if args.max_samples is not None and seen >= int(args.max_samples):
+                    break
+                if args.max_samples is not None:
+                    keep = int(args.max_samples) - seen
+                    eeg = eeg[:keep]
+                    labels = labels[:keep]
 
-            eeg = eeg.to(device=device, dtype=torch.float32)
-            logits = model(eeg)
-            probs = torch.softmax(logits, dim=1)
-            preds = probs.argmax(dim=1)
+                eeg = eeg.to(device=device, dtype=torch.float32)
+                logits = model(eeg)
+                probs = torch.softmax(logits, dim=1)
+                preds = probs.argmax(dim=1)
 
-            y_true.extend(labels.cpu().numpy().astype(np.int64).tolist())
-            y_pred.extend(preds.cpu().numpy().astype(np.int64).tolist())
-            y_prob.extend(probs.cpu().numpy().tolist())
-            seen += int(labels.shape[0])
+                y_true.extend(labels.cpu().numpy().astype(np.int64).tolist())
+                y_pred.extend(preds.cpu().numpy().astype(np.int64).tolist())
+                y_prob.extend(probs.cpu().numpy().tolist())
+                seen += int(labels.shape[0])
+            del loader
 
     y_true_np = np.asarray(y_true, dtype=np.int64)
     y_pred_np = np.asarray(y_pred, dtype=np.int64)

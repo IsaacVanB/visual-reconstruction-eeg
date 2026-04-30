@@ -1,9 +1,11 @@
 # Data
 dataset_root: datasets
-subject: sub-1
+split_seed: 0
+#subject: sub-1
 # Optional multi-subject training. When set, this takes precedence over subject.
 # subjects: [sub-1, sub-2, sub-3]
-split_seed: 0
+# Use every available datasets/THINGS_EEG_2/sub-*/preprocessed_eeg_training.npy:
+subjects: all
 
 # Notebook-compatible 20-class subset from resources/SKIL_IV/visual_decoding.ipynb.
 class_subset: classifier20

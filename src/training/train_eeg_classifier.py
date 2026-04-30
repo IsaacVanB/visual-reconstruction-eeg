@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+import gc
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import DataLoader
 import yaml
 
 from src.data import EEGImageAveragedDataset, EEGImageDataset, build_eeg_transform
@@ -146,15 +147,44 @@ def _resolve_classifier_class_indices(class_subset: str) -> tuple[list[int], lis
     return list(CLASSIFIER20_CLASS_INDICES), list(CLASSIFIER20_CLASS_NAMES)
 
 
+def _discover_all_subjects(dataset_root: str) -> tuple[str, ...]:
+    things_root = Path(dataset_root) / "THINGS_EEG_2"
+    if not things_root.exists():
+        raise FileNotFoundError(f"THINGS EEG root not found: {things_root}")
+
+    subjects = []
+    def subject_sort_key(path: Path) -> tuple[int, str]:
+        suffix = path.name.removeprefix("sub-")
+        return (int(suffix), path.name) if suffix.isdigit() else (10**9, path.name)
+
+    for subject_dir in sorted(things_root.glob("sub-*"), key=subject_sort_key):
+        eeg_path = subject_dir / "preprocessed_eeg_training.npy"
+        if subject_dir.is_dir() and eeg_path.exists():
+            subjects.append(subject_dir.name)
+    if not subjects:
+        raise FileNotFoundError(
+            f"No subject EEG files found under {things_root}. "
+            "Expected sub-*/preprocessed_eeg_training.npy."
+        )
+    return tuple(subjects)
+
+
 def _resolve_subjects(data: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     subjects_raw = data.get("subjects", None)
     if subjects_raw is None:
         subject = str(data["subject"])
         return subject, (subject,)
     if isinstance(subjects_raw, str):
-        subjects = (subjects_raw,)
+        if subjects_raw.lower() == "all":
+            subjects = _discover_all_subjects(str(data["dataset_root"]))
+        else:
+            subjects = (subjects_raw,)
     else:
         subjects = tuple(str(subject) for subject in subjects_raw)
+        if len(subjects) == 1 and subjects[0].lower() == "all":
+            subjects = _discover_all_subjects(str(data["dataset_root"]))
+        elif any(subject.lower() == "all" for subject in subjects):
+            raise ValueError("Use subjects: all by itself, not mixed with explicit subjects.")
     if not subjects:
         raise ValueError("subjects must be a non-empty sequence when provided.")
     if len(set(subjects)) != len(subjects):
@@ -323,7 +353,9 @@ def _get_eeg_transform_kwargs(config: EEGClassifierConfig) -> dict[str, Any]:
 
 
 def _compute_train_eeg_channel_stats(config: EEGClassifierConfig) -> dict[str, Any]:
-    train_blocks = []
+    channel_sum = None
+    channel_sumsq = None
+    count_per_channel = 0
     for subject in config.subjects:
         dataset = EEGImageDataset(
             dataset_root=config.dataset_root,
@@ -349,10 +381,26 @@ def _compute_train_eeg_channel_stats(config: EEGClassifierConfig) -> dict[str, A
                 start_idx=int(config.eeg_window_start_idx),
                 end_idx=int(config.eeg_window_end_idx),
             )
-        train_blocks.append(eeg_train.reshape(-1, eeg_train.shape[2], eeg_train.shape[3]))
-    eeg_train = np.concatenate(train_blocks, axis=0)
-    mean = eeg_train.mean(axis=(0, 2), dtype=np.float64).astype(np.float32)
-    std = eeg_train.std(axis=(0, 2), dtype=np.float64).astype(np.float32)
+        eeg_train = eeg_train.reshape(-1, eeg_train.shape[2], eeg_train.shape[3])
+        subject_sum = eeg_train.sum(axis=(0, 2), dtype=np.float64)
+        subject_sumsq = np.square(eeg_train, dtype=np.float64).sum(axis=(0, 2), dtype=np.float64)
+        subject_count = int(eeg_train.shape[0] * eeg_train.shape[2])
+        if channel_sum is None:
+            channel_sum = subject_sum
+            channel_sumsq = subject_sumsq
+        else:
+            channel_sum += subject_sum
+            channel_sumsq += subject_sumsq
+        count_per_channel += subject_count
+        del dataset, eeg_train
+        gc.collect()
+    if channel_sum is None or channel_sumsq is None or count_per_channel <= 0:
+        raise ValueError("No EEG samples available to compute zscore stats.")
+    mean64 = channel_sum / float(count_per_channel)
+    variance64 = (channel_sumsq / float(count_per_channel)) - np.square(mean64)
+    variance64 = np.maximum(variance64, 0.0)
+    mean = mean64.astype(np.float32)
+    std = np.sqrt(variance64).astype(np.float32)
     std = np.clip(std, float(config.eeg_zscore_eps), None)
     return {
         "mean": mean.tolist(),
@@ -361,8 +409,9 @@ def _compute_train_eeg_channel_stats(config: EEGClassifierConfig) -> dict[str, A
     }
 
 
-def _make_loader_with_stats(
+def _make_subject_loader_with_stats(
     config: EEGClassifierConfig,
+    subject: str,
     split: str,
     shuffle: bool,
     drop_last: bool,
@@ -389,36 +438,32 @@ def _make_loader_with_stats(
         )
 
     target_transform = ClassIndexToContiguousLabel(config.class_indices)
-    datasets = []
-    for subject in config.subjects:
-        if config.sample_mode == "repetitions":
-            dataset = EEGImageDataset(
-                dataset_root=config.dataset_root,
-                subject=subject,
-                split=split,
-                class_indices=config.class_indices,
-                transform=eeg_transform,
-                target_transform=target_transform,
-                split_seed=config.split_seed,
-            )
-        else:
-            dataset = EEGImageAveragedDataset(
-                dataset_root=config.dataset_root,
-                subject=subject,
-                split=split,
-                class_indices=config.class_indices,
-                transform=eeg_transform,
-                target_transform=target_transform,
-                split_seed=config.split_seed,
-                averaging_mode=config.sample_mode,
-                k_repeats=config.k_repeats,
-            )
-        datasets.append(dataset)
-    dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+    if config.sample_mode == "repetitions":
+        dataset = EEGImageDataset(
+            dataset_root=config.dataset_root,
+            subject=subject,
+            split=split,
+            class_indices=config.class_indices,
+            transform=eeg_transform,
+            target_transform=target_transform,
+            split_seed=config.split_seed,
+        )
+    else:
+        dataset = EEGImageAveragedDataset(
+            dataset_root=config.dataset_root,
+            subject=subject,
+            split=split,
+            class_indices=config.class_indices,
+            transform=eeg_transform,
+            target_transform=target_transform,
+            split_seed=config.split_seed,
+            averaging_mode=config.sample_mode,
+            k_repeats=config.k_repeats,
+        )
 
     if len(dataset) == 0:
         raise ValueError(
-            f"No samples found for split={split!r}, subjects={list(config.subjects)}, "
+            f"No samples found for split={split!r}, subject={subject!r}, "
             f"class_subset={config.class_subset!r}."
         )
 
@@ -431,6 +476,28 @@ def _make_loader_with_stats(
         drop_last=drop_last,
         collate_fn=_eeg_classifier_collate,
         persistent_workers=config.num_workers > 0,
+    )
+
+
+def _make_loader_with_stats(
+    config: EEGClassifierConfig,
+    split: str,
+    shuffle: bool,
+    drop_last: bool,
+    eeg_zscore_stats: Optional[dict[str, Any]],
+) -> DataLoader:
+    if len(config.subjects) != 1:
+        raise ValueError(
+            "_make_loader_with_stats only supports a single subject. "
+            "Use _run_epoch_over_subjects for multi-subject streaming."
+        )
+    return _make_subject_loader_with_stats(
+        config=config,
+        subject=config.subjects[0],
+        split=split,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        eeg_zscore_stats=eeg_zscore_stats,
     )
 
 
@@ -496,7 +563,82 @@ def _run_epoch(
         "loss": running_loss / denom,
         "ce_loss": running_ce_loss / denom,
         "accuracy": correct / denom,
+        "count": count,
     }
+
+
+def _merge_epoch_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
+    total = sum(int(metric["count"]) for metric in metrics)
+    if total <= 0:
+        return {"loss": 0.0, "ce_loss": 0.0, "accuracy": 0.0, "count": 0}
+    return {
+        "loss": sum(metric["loss"] * int(metric["count"]) for metric in metrics) / total,
+        "ce_loss": sum(metric["ce_loss"] * int(metric["count"]) for metric in metrics) / total,
+        "accuracy": sum(metric["accuracy"] * int(metric["count"]) for metric in metrics) / total,
+        "count": total,
+    }
+
+
+def _run_epoch_over_subjects(
+    model: EEGClassifier20CNN,
+    config: EEGClassifierConfig,
+    split: str,
+    device: torch.device,
+    l1_weight: float,
+    eeg_zscore_stats: Optional[dict[str, Any]],
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    shuffle: bool = False,
+    drop_last: bool = False,
+    epoch: int = 0,
+) -> dict[str, float]:
+    subjects = list(config.subjects)
+    if shuffle and len(subjects) > 1:
+        rng = np.random.default_rng(int(config.split_seed) + int(epoch))
+        subjects = rng.permutation(subjects).tolist()
+
+    metrics = []
+    for subject in subjects:
+        loader = _make_subject_loader_with_stats(
+            config=config,
+            subject=str(subject),
+            split=split,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            eeg_zscore_stats=eeg_zscore_stats,
+        )
+        metrics.append(
+            _run_epoch(
+                model=model,
+                loader=loader,
+                device=device,
+                l1_weight=l1_weight,
+                optimizer=optimizer,
+            )
+        )
+        del loader
+        gc.collect()
+    return _merge_epoch_metrics(metrics)
+
+
+def _count_samples_for_split(
+    config: EEGClassifierConfig,
+    split: str,
+    eeg_zscore_stats: Optional[dict[str, Any]],
+) -> int:
+    total = 0
+    for subject in config.subjects:
+        loader = _make_subject_loader_with_stats(
+            config=config,
+            subject=subject,
+            split=split,
+            shuffle=False,
+            drop_last=False,
+            eeg_zscore_stats=eeg_zscore_stats,
+        )
+        total += len(loader.dataset)
+        del loader
+        gc.collect()
+    return total
 
 
 def _save_artifacts(
@@ -595,10 +737,30 @@ def _save_artifacts(
     }
 
 
+def _resolve_run_output_dir(output_dir: str) -> Path:
+    base_dir = Path(output_dir)
+    if base_dir.name.startswith("run_"):
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return base_dir
+
+    run_name = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir = base_dir / run_name
+    if not run_dir.exists():
+        run_dir.mkdir(parents=True, exist_ok=False)
+        return run_dir
+
+    for suffix in range(1, 1000):
+        candidate = base_dir / f"{run_name}_{suffix:03d}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+    raise FileExistsError(f"Could not create a unique run directory under {base_dir}.")
+
+
 def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
     device = resolve_torch_device(config.device)
-    output_dir = Path(config.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _resolve_run_output_dir(config.output_dir)
+    config.output_dir = str(output_dir)
 
     eeg_window = _resolve_eeg_window_config(config=config)
     eeg_zscore_stats = None
@@ -606,40 +768,37 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
         eeg_zscore_stats = _compute_train_eeg_channel_stats(config=config)
         print("Computed train-set EEG zscore stats.")
 
-    train_loader = _make_loader_with_stats(
+    sample_loader = _make_subject_loader_with_stats(
         config=config,
-        split="train",
-        shuffle=True,
-        drop_last=True,
-        eeg_zscore_stats=eeg_zscore_stats,
-    )
-    train_eval_loader = _make_loader_with_stats(
-        config=config,
+        subject=config.subjects[0],
         split="train",
         shuffle=False,
         drop_last=False,
         eeg_zscore_stats=eeg_zscore_stats,
     )
-    valid_loader = _make_loader_with_stats(
-        config=config,
-        split="valid",
-        shuffle=False,
-        drop_last=False,
-        eeg_zscore_stats=eeg_zscore_stats,
-    )
-    test_loader = _make_loader_with_stats(
-        config=config,
-        split="test",
-        shuffle=False,
-        drop_last=False,
-        eeg_zscore_stats=eeg_zscore_stats,
-    )
-
-    sample_eeg, _sample_image, sample_label = train_loader.dataset[0]
+    sample_eeg, _sample_image, sample_label = sample_loader.dataset[0]
     eeg_channels = int(sample_eeg.shape[0])
     eeg_timesteps = int(sample_eeg.shape[1])
     if not 0 <= int(sample_label) < int(config.num_classes):
         raise ValueError(f"Mapped label {sample_label} is outside [0, {config.num_classes - 1}].")
+    del sample_loader
+    gc.collect()
+
+    train_samples = _count_samples_for_split(
+        config=config,
+        split="train",
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
+    valid_samples = _count_samples_for_split(
+        config=config,
+        split="valid",
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
+    test_samples = _count_samples_for_split(
+        config=config,
+        split="test",
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
 
     model = EEGClassifier20CNN(
         eeg_channels=eeg_channels,
@@ -656,10 +815,10 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
     print(f"Subjects: {list(config.subjects)}")
     print(f"Class subset: {config.class_subset}")
     print(f"Class indices: {list(config.class_indices)}")
-    print(f"Train samples: {len(train_loader.dataset)}")
-    print(f"Train-eval samples: {len(train_eval_loader.dataset)}")
-    print(f"Valid samples: {len(valid_loader.dataset)}")
-    print(f"Test samples: {len(test_loader.dataset)}")
+    print(f"Train samples: {train_samples}")
+    print(f"Train-eval samples: {train_samples}")
+    print(f"Valid samples: {valid_samples}")
+    print(f"Test samples: {test_samples}")
     print(f"EEG sample shape: ({eeg_channels}, {eeg_timesteps})")
     print(f"EEG normalization: {config.eeg_normalization}")
     print(f"Sample mode: {config.sample_mode}")
@@ -688,33 +847,53 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
     best_epoch = 0
     best_model_state_dict: Optional[dict[str, torch.Tensor]] = None
     for epoch in range(1, config.epochs + 1):
-        train_metrics = _run_epoch(
+        train_metrics = _run_epoch_over_subjects(
             model=model,
-            loader=train_loader,
+            config=config,
+            split="train",
             device=device,
             l1_weight=config.l1_weight,
+            eeg_zscore_stats=eeg_zscore_stats,
             optimizer=optimizer,
+            shuffle=True,
+            drop_last=True,
+            epoch=epoch,
         )
-        train_eval_metrics = _run_epoch(
+        train_eval_metrics = _run_epoch_over_subjects(
             model=model,
-            loader=train_eval_loader,
+            config=config,
+            split="train",
             device=device,
             l1_weight=0.0,
+            eeg_zscore_stats=eeg_zscore_stats,
             optimizer=None,
+            shuffle=False,
+            drop_last=False,
+            epoch=epoch,
         )
-        valid_metrics = _run_epoch(
+        valid_metrics = _run_epoch_over_subjects(
             model=model,
-            loader=valid_loader,
+            config=config,
+            split="valid",
             device=device,
             l1_weight=0.0,
+            eeg_zscore_stats=eeg_zscore_stats,
             optimizer=None,
+            shuffle=False,
+            drop_last=False,
+            epoch=epoch,
         )
-        test_metrics = _run_epoch(
+        test_metrics = _run_epoch_over_subjects(
             model=model,
-            loader=test_loader,
+            config=config,
+            split="test",
             device=device,
             l1_weight=0.0,
+            eeg_zscore_stats=eeg_zscore_stats,
             optimizer=None,
+            shuffle=False,
+            drop_last=False,
+            epoch=epoch,
         )
 
         history["train_loss"].append(train_metrics["loss"])
