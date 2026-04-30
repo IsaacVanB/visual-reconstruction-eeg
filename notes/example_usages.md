@@ -1,12 +1,22 @@
 # Example Usages
 
-This file documents active, tracked code paths for the VAE-based pipeline.
+This file documents active, tracked code paths for the VAE-based EEG encoder
+pipeline and the `classifier20` EEG classifier pipeline.
 
 Class subset presets supported:
-- `default100`: classes `[0, 2, 4, ..., 198]`
-- `all`: all classes available in dataset metadata
+- EEG encoder training: `default100`, `default1000`, `all`
+- VAE latent extraction: `default100`, `default800`, `all`
+- EEG classifier training: `classifier20`
+
+Classifier subject selection:
+- `--subject sub-1`: train/evaluate one subject
+- `--subjects sub-1 sub-2 sub-3`: train/evaluate explicit subjects
+- `--subjects all` or `subjects: all`: use every available
+  `datasets/THINGS_EEG_2/sub-*/preprocessed_eeg_training.npy`
 
 ## Minimum Runbook
+
+### VAE EEG Encoder
 
 1) Extract VAE targets (full + PCA-128 with standardization):
 ```bash
@@ -45,12 +55,68 @@ python scripts/vae_latent_decode.py \
   --device cuda
 ```
 
+### EEG Classifier
+
+Train the notebook-compatible 20-class classifier on one subject:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --dataset-root datasets \
+  --subject sub-1 \
+  --output-dir outputs/eeg_classifier \
+  --device cuda
+```
+
+Train on all available subjects:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --dataset-root datasets \
+  --subjects all \
+  --output-dir outputs/eeg_classifier \
+  --device cuda
+```
+
+Classifier training writes each run to:
+```text
+outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/
+```
+
+Evaluate a classifier checkpoint and save confusion matrix artifacts:
+```bash
+python scripts/eval_eeg_classifier.py \
+  --checkpoint-path outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eeg_classifier20_best_YYYYMMDD_HHMMSS.pt \
+  --split test \
+  --device cuda
+```
+
+Evaluation saves artifacts to:
+```text
+outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eval/
+```
+
 ## Config
 
 `configs/eeg_encoder.yaml`  
 Default config for EEG encoder training against VAE PCA latents.
 ```bash
 python scripts/train_eeg_encoder.py --config configs/eeg_encoder.yaml
+```
+
+`configs/eeg_classifier.yaml`  
+Default config for classifier20 EEG classification.
+```bash
+python scripts/train_eeg_classifier.py --config configs/eeg_classifier.yaml
+```
+
+Useful overrides:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --subjects all \
+  --batch-size 16 \
+  --epochs 30 \
+  --device cuda
 ```
 
 ## Scripts
@@ -96,6 +162,55 @@ python scripts/train_eeg_encoder.py \
   --output-dim 128 \
   --epochs 20 \
   --output-dir outputs/eeg_encoder \
+  --device cuda
+```
+
+`scripts/train_eeg_classifier.py`  
+CLI wrapper for classifier20 EEG classifier training. Uses the same EEG
+normalization/windowing style as the main `src` pipeline and streams subjects
+one at a time for multi-subject runs.
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --dataset-root datasets \
+  --subjects all \
+  --batch-size 16 \
+  --epochs 30 \
+  --output-dir outputs/eeg_classifier \
+  --device cuda
+```
+
+Single-subject run:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --subject sub-1 \
+  --device cuda
+```
+
+Explicit multi-subject run:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --subjects sub-1 sub-2 sub-3 \
+  --device cuda
+```
+
+`scripts/eval_eeg_classifier.py`  
+Evaluate a classifier20 checkpoint and write confusion matrix artifacts.
+```bash
+python scripts/eval_eeg_classifier.py \
+  --checkpoint-path outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eeg_classifier20_best_YYYYMMDD_HHMMSS.pt \
+  --split test \
+  --device cuda
+```
+
+Optional quick evaluation:
+```bash
+python scripts/eval_eeg_classifier.py \
+  --checkpoint-path outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eeg_classifier20_best_YYYYMMDD_HHMMSS.pt \
+  --split test \
+  --max-samples 16 \
   --device cuda
 ```
 
@@ -166,6 +281,16 @@ model = EEGEncoderCNN(eeg_channels=17, eeg_timesteps=100, output_dim=128)
 y = model(torch.randn(8, 17, 100))
 ```
 
+`src/models/eeg_classifier.py`  
+Notebook-style 2D CNN classifier for EEG `[B,C,T]` -> 20-class logits.
+```python
+import torch
+from src.models import EEGClassifier20CNN
+
+model = EEGClassifier20CNN(eeg_channels=17, eeg_timesteps=51, num_classes=20)
+logits = model(torch.randn(8, 17, 51))
+```
+
 ## Source: Training
 
 `src/training/train_eeg_encoder.py`  
@@ -175,6 +300,15 @@ from src.training import load_eeg_encoder_config, train_eeg_encoder
 
 cfg = load_eeg_encoder_config("configs/eeg_encoder.yaml")
 train_eeg_encoder(cfg)
+```
+
+`src/training/train_eeg_classifier.py`  
+Training loop used by `scripts/train_eeg_classifier.py`.
+```python
+from src.training import load_eeg_classifier_config, train_eeg_classifier
+
+cfg = load_eeg_classifier_config("configs/eeg_classifier.yaml")
+train_eeg_classifier(cfg)
 ```
 
 ## Source: Evaluation
@@ -221,6 +355,22 @@ python src/evaluation/eval_eeg_with_mean_baselines.py \
 
 `src/evaluation/eeg_eval_core.py`  
 Shared checkpoint/model/loader/eval utility functions used by evaluation scripts.
+
+`src/evaluation/eval_eeg_classifier.py`  
+Loads a classifier20 checkpoint, restores saved preprocessing stats/config, and
+saves confusion matrix outputs.
+```bash
+python src/evaluation/eval_eeg_classifier.py \
+  --checkpoint-path outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eeg_classifier20_best_YYYYMMDD_HHMMSS.pt \
+  --split test \
+  --device cuda
+```
+
+## Colab
+
+`notes/colab_eeg_classifier_training.md`  
+Recommended Colab workflow for classifier training. Use Colab as a wrapper around
+the repo scripts instead of copying training code into notebook cells.
 
 ## Tests and Utilities
 
