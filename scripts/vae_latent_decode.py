@@ -25,12 +25,15 @@ def parse_args():
     parser.add_argument(
         "--latent-path",
         required=True,
-        help="Path to PCA-space latent .pt file (e.g. from latents/img_pca).",
+        help="Path to latent .pt file (full VAE latent or PCA-space latent).",
     )
     parser.add_argument(
         "--pca-params-path",
-        default="latents/img_pca/pca_128.pt",
-        help="Path to PCA params .pt containing pca_mean and pca_components.",
+        default=None,
+        help=(
+            "Path to PCA params .pt containing pca_mean and pca_components. "
+            "Required only when --latent-path is PCA-space."
+        ),
     )
     parser.add_argument(
         "--output-path",
@@ -212,7 +215,7 @@ def main():
     args = parse_args()
 
     latent_path = Path(args.latent_path)
-    pca_params_path = Path(args.pca_params_path)
+    pca_params_path = Path(args.pca_params_path) if args.pca_params_path is not None else None
     metadata_path = Path(args.metadata_path)
     output_path = Path(args.output_path)
     _validate_output_image_path(output_path)
@@ -220,55 +223,70 @@ def main():
 
     if not latent_path.exists():
         raise FileNotFoundError(f"Latent file not found: {latent_path}")
-    if not pca_params_path.exists():
-        raise FileNotFoundError(f"PCA params file not found: {pca_params_path}")
 
     latent_obj = _load_pt(latent_path)
-    z_pca = _extract_latent_tensor(latent_obj, args.latent_key).to(dtype=torch.float32).flatten()
-
-    pca_params = _load_pt(pca_params_path)
-    if not isinstance(pca_params, dict):
-        raise TypeError("PCA params file must contain a dict.")
-    if "pca_mean" not in pca_params or "pca_components" not in pca_params:
-        raise KeyError("PCA params must contain 'pca_mean' and 'pca_components'.")
-    _validate_pca_latent_compatibility(
-        latent_path=latent_path,
-        pca_params_path=pca_params_path,
-        pca_params=pca_params,
-    )
-
-    pca_mean = pca_params["pca_mean"].to(dtype=torch.float32).flatten()         # [D]
-    pca_components = pca_params["pca_components"].to(dtype=torch.float32)       # [k, D]
-    if pca_components.ndim != 2:
-        raise ValueError(f"Expected pca_components [k, D], got {tuple(pca_components.shape)}")
-    k, d = pca_components.shape
-    if z_pca.numel() != k:
-        raise ValueError(f"Latent length {z_pca.numel()} does not match PCA k={k}.")
-    if pca_mean.numel() != d:
-        raise ValueError(f"pca_mean length {pca_mean.numel()} does not match PCA D={d}.")
-
-    # If PCA targets were standardized during extraction, undo it first.
-    if bool(pca_params.get("pca_standardized", False)):
-        if "pca_train_mean" not in pca_params or "pca_train_std" not in pca_params:
-            raise KeyError(
-                "PCA params indicate standardized latents but are missing "
-                "'pca_train_mean'/'pca_train_std'."
-            )
-        pca_train_mean = pca_params["pca_train_mean"].to(dtype=torch.float32).flatten()
-        pca_train_std = pca_params["pca_train_std"].to(dtype=torch.float32).flatten()
-        if pca_train_mean.numel() != k or pca_train_std.numel() != k:
-            raise ValueError("PCA standardization stats shape does not match PCA k.")
-        z_pca = z_pca * pca_train_std + pca_train_mean
-
-    # Inverse PCA: x = mean + z @ components
-    z_full = pca_mean + (z_pca.unsqueeze(0) @ pca_components).squeeze(0)  # [D]
-
     c, h, w = args.latent_shape
-    if c * h * w != d:
-        raise ValueError(
-            f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={d}."
+    d_full = c * h * w
+    latent_tensor = _extract_latent_tensor(latent_obj, args.latent_key).to(dtype=torch.float32)
+    z_flat = latent_tensor.flatten()
+    pca_k = None
+
+    # Full latent path: tensor already has VAE latent dimensionality.
+    if z_flat.numel() == d_full:
+        z_vae = z_flat.view(1, c, h, w)
+    else:
+        # PCA latent path: requires PCA params for inverse transform.
+        if pca_params_path is None:
+            raise ValueError(
+                "Detected PCA-space latent (size does not match --latent-shape), but "
+                "--pca-params-path was not provided."
+            )
+        if not pca_params_path.exists():
+            raise FileNotFoundError(f"PCA params file not found: {pca_params_path}")
+
+        z_pca = z_flat
+        pca_params = _load_pt(pca_params_path)
+        if not isinstance(pca_params, dict):
+            raise TypeError("PCA params file must contain a dict.")
+        if "pca_mean" not in pca_params or "pca_components" not in pca_params:
+            raise KeyError("PCA params must contain 'pca_mean' and 'pca_components'.")
+        _validate_pca_latent_compatibility(
+            latent_path=latent_path,
+            pca_params_path=pca_params_path,
+            pca_params=pca_params,
         )
-    z_vae = z_full.view(1, c, h, w)
+
+        pca_mean = pca_params["pca_mean"].to(dtype=torch.float32).flatten()         # [D]
+        pca_components = pca_params["pca_components"].to(dtype=torch.float32)       # [k, D]
+        if pca_components.ndim != 2:
+            raise ValueError(f"Expected pca_components [k, D], got {tuple(pca_components.shape)}")
+        pca_k, d = pca_components.shape
+        if z_pca.numel() != pca_k:
+            raise ValueError(f"Latent length {z_pca.numel()} does not match PCA k={pca_k}.")
+        if pca_mean.numel() != d:
+            raise ValueError(f"pca_mean length {pca_mean.numel()} does not match PCA D={d}.")
+
+        # If PCA targets were standardized during extraction, undo it first.
+        if bool(pca_params.get("pca_standardized", False)):
+            if "pca_train_mean" not in pca_params or "pca_train_std" not in pca_params:
+                raise KeyError(
+                    "PCA params indicate standardized latents but are missing "
+                    "'pca_train_mean'/'pca_train_std'."
+                )
+            pca_train_mean = pca_params["pca_train_mean"].to(dtype=torch.float32).flatten()
+            pca_train_std = pca_params["pca_train_std"].to(dtype=torch.float32).flatten()
+            if pca_train_mean.numel() != pca_k or pca_train_std.numel() != pca_k:
+                raise ValueError("PCA standardization stats shape does not match PCA k.")
+            z_pca = z_pca * pca_train_std + pca_train_mean
+
+        # Inverse PCA: x = mean + z @ components
+        z_full = pca_mean + (z_pca.unsqueeze(0) @ pca_components).squeeze(0)  # [D]
+
+        if d_full != d:
+            raise ValueError(
+                f"latent-shape {tuple(args.latent_shape)} has {d_full} elements, but PCA D={d}."
+            )
+        z_vae = z_full.view(1, c, h, w)
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device).eval()
@@ -306,7 +324,8 @@ def main():
     out_img = tensor_to_pil(recon_01[0])
     out_img.save(output_path)
     print(f"Saved decoded image to: {output_path}")
-    print(f"Latent PCA dim: {k}")
+    if pca_k is not None:
+        print(f"Latent PCA dim: {pca_k}")
     print(f"Recovered latent shape: {tuple(z_vae.shape)}")
     print(f"Used inverse scaling factor: {scaling_factor}")
     print(f"Decode latent scaling mode: {decode_scaling_mode}")

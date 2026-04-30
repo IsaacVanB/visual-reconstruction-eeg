@@ -1,0 +1,40 @@
+# Data
+dataset_root: datasets
+subject: sub-1
+# Optional multi-subject training. When set, this takes precedence over subject.
+# subjects: [sub-1, sub-2, sub-3]
+split_seed: 0
+
+# Notebook-compatible 20-class subset from resources/SKIL_IV/visual_decoding.ipynb.
+class_subset: classifier20
+
+# Optimization
+batch_size: 32
+num_workers: 0
+lr: 0.0005
+weight_decay: 0.0
+epochs: 10
+
+# L1 regularization on the first dense layer, matching the notebook's Dense(128) regularizer.
+l1_weight: 0.0005
+
+# Runtime/output
+device: auto
+output_dir: outputs/eeg_classifier
+run_change_note: "Initial classifier implementation"
+
+# EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
+eeg_normalization: zscore
+eeg_zscore_eps: 1.0e-6
+
+# Optional EEG time-window crop applied at runtime before normalization.
+eeg_window_pre_ms: 0
+eeg_window_post_ms: 500
+
+# EEG sampling:
+# - repetitions: train/eval on each repetition separately, closest to the notebook
+# - all: average all repeats per stimulus
+# - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
+sample_mode: repetitions
+# Required when sample_mode: random_k
+# k_repeats: 2
