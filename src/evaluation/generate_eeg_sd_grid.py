@@ -7,6 +7,7 @@ import sys
 from typing import Any
 import warnings
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import torch
 
@@ -80,6 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1022)
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--lpips-net", default="alex", choices=["alex", "vgg", "squeeze"])
     parser.add_argument(
         "--negative-prompt",
         default="low quality, blurry, distorted, deformed",
@@ -266,14 +268,41 @@ def _tensor_to_pil(image_chw_01: torch.Tensor, size: int | None = None) -> Image
     return image
 
 
+def _pil_to_tensor_01(image: Image.Image, device: torch.device) -> torch.Tensor:
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).contiguous()
+    return tensor.to(device=device, dtype=torch.float32)
+
+
 def _load_ground_truth(image_path: Path, size: int) -> Image.Image:
     with Image.open(image_path) as img:
         return img.convert("RGB").resize((size, size), resample=Image.BICUBIC)
 
 
-def _load_font(size: int) -> ImageFont.ImageFont:
+def _load_ssim_fn():
     try:
-        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+        from torchmetrics.functional.image import structural_similarity_index_measure
+    except ImportError as exc:
+        raise ImportError(
+            "torchmetrics is required for SSIM. Install with: pip install torchmetrics"
+        ) from exc
+
+    return structural_similarity_index_measure
+
+
+def _load_lpips_metric(net: str, device: torch.device):
+    try:
+        import lpips
+    except ImportError as exc:
+        raise ImportError("lpips is required for LPIPS. Install with: pip install lpips") from exc
+
+    return lpips.LPIPS(net=net).to(device).eval()
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    try:
+        font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+        return ImageFont.truetype(font_name, size=size)
     except OSError:
         return ImageFont.load_default()
 
@@ -288,22 +317,78 @@ def _fit_font_for_width(text: str, max_width: int, max_size: int, min_size: int 
     return _load_font(min_size)
 
 
+def _fit_caption_fonts(caption, max_width: int, max_size: int, min_size: int = 12):
+    measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    segments = [(caption, False)] if isinstance(caption, str) else caption
+    for size in range(max_size, min_size - 1, -1):
+        fonts = [_load_font(size, bold=bool(bold)) for _text, bold in segments]
+        width = 0
+        for (text, _bold), font in zip(segments, fonts):
+            bbox = measure_draw.textbbox((0, 0), str(text), font=font)
+            width += bbox[2] - bbox[0]
+        if width <= max_width:
+            return segments, fonts
+    return segments, [_load_font(min_size, bold=bool(bold)) for _text, bold in segments]
+
+
+def _draw_caption(
+    draw: ImageDraw.ImageDraw,
+    caption,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> None:
+    segments, fonts = _fit_caption_fonts(caption, max_width=width - 16, max_size=24)
+    measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    segment_bboxes = [
+        measure_draw.textbbox((0, 0), str(text), font=font)
+        for (text, _bold), font in zip(segments, fonts)
+    ]
+    total_w = sum(bbox[2] - bbox[0] for bbox in segment_bboxes)
+    text_h = max((bbox[3] - bbox[1] for bbox in segment_bboxes), default=0)
+    cursor_x = x + (width - total_w) // 2
+    text_y = y + (height - text_h) // 2
+    for (text, _bold), font, bbox in zip(segments, fonts, segment_bboxes):
+        draw.text((cursor_x, text_y - bbox[1]), str(text), fill="black", font=font)
+        cursor_x += bbox[2] - bbox[0]
+
+
+def _metric_caption(ssim_value: float, lpips_value: float, bold_ssim: bool, bold_lpips: bool):
+    return [
+        ("↑ SSIM ", False),
+        (f"{ssim_value:.3f}", bold_ssim),
+        (" | ↓ LPIPS ", False),
+        (f"{lpips_value:.3f}", bold_lpips),
+    ]
+
+
 def _build_grid(
     rows: list[tuple[str, list[Image.Image]]],
     column_labels: list[str],
+    cell_captions: list[list[Any | None]] | None = None,
 ) -> Image.Image:
     if not rows or not rows[0][1]:
         raise ValueError("No images available for grid.")
     if len(column_labels) != len(rows[0][1]):
         raise ValueError("column_labels length must match the number of grid columns.")
+    if cell_captions is None:
+        cell_captions = [[None for _ in images] for _row_label, images in rows]
+    if len(cell_captions) != len(rows):
+        raise ValueError("cell_captions row count must match rows.")
+    for captions, (_row_label, images) in zip(cell_captions, rows):
+        if len(captions) != len(images):
+            raise ValueError("Each cell_captions row must match its image row length.")
 
     cell_w, cell_h = rows[0][1][0].size
     label_w = 120
     header_h = 54
+    caption_h = 62
+    row_h = cell_h + caption_h
     n_cols = len(rows[0][1])
     canvas = Image.new(
         "RGB",
-        (label_w + n_cols * cell_w, header_h + len(rows) * cell_h),
+        (label_w + n_cols * cell_w, header_h + len(rows) * row_h),
         "white",
     )
     draw = ImageDraw.Draw(canvas)
@@ -323,9 +408,9 @@ def _build_grid(
         )
 
     measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    row_font = _load_font(max(18, min(42, cell_h // 4)))
+    row_font = _load_font(max(18, min(42, row_h // 4)))
     for row_idx, (row_label, images) in enumerate(rows):
-        y = header_h + row_idx * cell_h
+        y = header_h + row_idx * row_h
         label_text = row_label.replace("_", " ")
         bbox = measure_draw.textbbox((0, 0), label_text, font=row_font)
         text_w = bbox[2] - bbox[0]
@@ -339,12 +424,25 @@ def _build_grid(
             rotated,
             (
                 max(0, (label_w - rotated.width) // 2),
-                y + max(0, (cell_h - rotated.height) // 2),
+                y + max(0, (row_h - rotated.height) // 2),
             ),
             rotated,
         )
         for col_idx, image in enumerate(images):
             canvas.paste(image, (label_w + col_idx * cell_w, y))
+            caption = cell_captions[row_idx][col_idx]
+            if caption:
+                x = label_w + col_idx * cell_w
+                if isinstance(caption, str):
+                    caption = caption.replace("_", " ")
+                _draw_caption(
+                    draw=draw,
+                    caption=caption,
+                    x=x,
+                    y=y + cell_h,
+                    width=cell_w,
+                    height=caption_h,
+                )
     return canvas
 
 
@@ -578,6 +676,8 @@ def main() -> None:
         device=device,
         fp16=args.fp16,
     )
+    ssim_fn = _load_ssim_fn()
+    lpips_metric = _load_lpips_metric(net=args.lpips_net, device=device)
 
     target_count = min(int(args.max_samples), len(raw_dataset))
     if target_count <= 0:
@@ -585,6 +685,9 @@ def main() -> None:
     ground_truth_images: list[Image.Image] = []
     label_only_images: list[Image.Image] = []
     label_image_images: list[Image.Image] = []
+    ground_truth_captions: list[str | None] = []
+    label_only_captions: list[str | None] = []
+    label_image_captions: list[str | None] = []
     column_labels: list[str] = []
     manifest_rows: list[dict[str, Any]] = []
 
@@ -672,6 +775,35 @@ def main() -> None:
                 generator=generator,
             ).images[0]
 
+            gt_tensor = _pil_to_tensor_01(gt_image, device=device)
+            label_tensor = _pil_to_tensor_01(label_image, device=device)
+            label_img2img_tensor = _pil_to_tensor_01(label_img2img, device=device)
+            ssim_label_only = float(
+                ssim_fn(label_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
+            )
+            ssim_label_image = float(
+                ssim_fn(label_img2img_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
+            )
+            gt_tensor_lpips = gt_tensor * 2.0 - 1.0
+            lpips_label_only = float(
+                lpips_metric(label_tensor * 2.0 - 1.0, gt_tensor_lpips)
+                .view(-1)
+                .detach()
+                .cpu()
+                .item()
+            )
+            lpips_label_image = float(
+                lpips_metric(label_img2img_tensor * 2.0 - 1.0, gt_tensor_lpips)
+                .view(-1)
+                .detach()
+                .cpu()
+                .item()
+            )
+            label_only_better_ssim = ssim_label_only >= ssim_label_image
+            label_image_better_ssim = ssim_label_image >= ssim_label_only
+            label_only_better_lpips = lpips_label_only <= lpips_label_image
+            label_image_better_lpips = lpips_label_image <= lpips_label_only
+
             base_name = f"{sample_pos:02d}_img_{image_index:06d}_{pred_label}"
             label_only_path = sd_label_dir / f"{base_name}.png"
             label_image_path = sd_img2img_dir / f"{base_name}.png"
@@ -689,6 +821,23 @@ def main() -> None:
             ground_truth_images.append(gt_image)
             label_only_images.append(label_image)
             label_image_images.append(label_img2img)
+            ground_truth_captions.append(None)
+            label_only_captions.append(
+                _metric_caption(
+                    ssim_value=ssim_label_only,
+                    lpips_value=lpips_label_only,
+                    bold_ssim=label_only_better_ssim,
+                    bold_lpips=label_only_better_lpips,
+                )
+            )
+            label_image_captions.append(
+                _metric_caption(
+                    ssim_value=ssim_label_image,
+                    lpips_value=lpips_label_image,
+                    bold_ssim=label_image_better_ssim,
+                    bold_lpips=label_image_better_lpips,
+                )
+            )
             manifest_rows.append(
                 {
                     "sample_pos": sample_pos,
@@ -700,6 +849,10 @@ def main() -> None:
                     "pred_label": pred_label,
                     "pred_prob": pred_prob,
                     "classifier_correct": classifier_correct,
+                    "ssim_label_only": ssim_label_only,
+                    "ssim_label_image": ssim_label_image,
+                    "lpips_label_only": lpips_label_only,
+                    "lpips_label_image": lpips_label_image,
                     "classifier_trial_mode": args.classifier_trial_mode,
                     "selected_rep_index": classifier_result["selected_rep_index"],
                     "per_trial_predictions": json.dumps(classifier_result["per_trial_predictions"]),
@@ -730,6 +883,11 @@ def main() -> None:
             ("Label + EEG image", label_image_images),
         ],
         column_labels=column_labels,
+        cell_captions=[
+            ground_truth_captions,
+            label_only_captions,
+            label_image_captions,
+        ],
     )
     grid_path = output_dir / "eeg_sd_grid.png"
     grid.save(grid_path)
@@ -763,6 +921,7 @@ def main() -> None:
                 "guidance_scale": args.guidance_scale,
                 "num_inference_steps": args.num_inference_steps,
                 "seed": args.seed,
+                "lpips_net": args.lpips_net,
                 "correct_only": bool(args.correct_only),
                 "classifier_trial_mode": args.classifier_trial_mode,
                 "samples": manifest_rows,
