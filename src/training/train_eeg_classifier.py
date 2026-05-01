@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import yaml
 
-from src.data import EEGImageAveragedDataset, EEGImageDataset, build_eeg_transform
+from src.data import EEGLabelAveragedDataset, EEGLabelDataset, build_eeg_transform
 from src.data.transforms import crop_eeg_time_window, resolve_eeg_time_window
 from src.models import EEGClassifier20CNN, extract_eeg_classifier20_arch_metadata
 from src.training.train_eeg_encoder import resolve_torch_device
@@ -319,7 +319,7 @@ def _resolve_eeg_window_config(config: EEGClassifierConfig) -> Optional[dict[str
         config.eeg_window_num_timepoints = None
         return None
 
-    dataset = EEGImageDataset(
+    dataset = EEGLabelDataset(
         dataset_root=config.dataset_root,
         subject=config.subjects[0],
         split="train",
@@ -357,7 +357,7 @@ def _compute_train_eeg_channel_stats(config: EEGClassifierConfig) -> dict[str, A
     channel_sumsq = None
     count_per_channel = 0
     for subject in config.subjects:
-        dataset = EEGImageDataset(
+        dataset = EEGLabelDataset(
             dataset_root=config.dataset_root,
             subject=subject,
             split="train",
@@ -439,7 +439,7 @@ def _make_subject_loader_with_stats(
 
     target_transform = ClassIndexToContiguousLabel(config.class_indices)
     if config.sample_mode == "repetitions":
-        dataset = EEGImageDataset(
+        dataset = EEGLabelDataset(
             dataset_root=config.dataset_root,
             subject=subject,
             split=split,
@@ -449,7 +449,7 @@ def _make_subject_loader_with_stats(
             split_seed=config.split_seed,
         )
     else:
-        dataset = EEGImageAveragedDataset(
+        dataset = EEGLabelAveragedDataset(
             dataset_root=config.dataset_root,
             subject=subject,
             split=split,
@@ -509,9 +509,8 @@ def _eeg_classifier_collate(batch):
         eeg = torch.stack(eeg_items, dim=0)
     else:
         eeg = torch.from_numpy(np.stack(eeg_items))
-    images = [item[1] for item in batch]
-    labels = torch.tensor([item[2] for item in batch], dtype=torch.long)
-    return eeg, images, labels
+    labels = torch.tensor([item[1] for item in batch], dtype=torch.long)
+    return eeg, labels
 
 
 def _run_epoch(
@@ -529,7 +528,7 @@ def _run_epoch(
     correct = 0
     count = 0
 
-    for eeg, _image, labels in loader:
+    for eeg, labels in loader:
         eeg = eeg.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.long)
 
@@ -776,7 +775,7 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
         drop_last=False,
         eeg_zscore_stats=eeg_zscore_stats,
     )
-    sample_eeg, _sample_image, sample_label = sample_loader.dataset[0]
+    sample_eeg, sample_label = sample_loader.dataset[0]
     eeg_channels = int(sample_eeg.shape[0])
     eeg_timesteps = int(sample_eeg.shape[1])
     if not 0 <= int(sample_label) < int(config.num_classes):

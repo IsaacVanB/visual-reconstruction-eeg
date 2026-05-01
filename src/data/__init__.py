@@ -3,6 +3,8 @@ from .datasets import (
     EEGImageDataset,
     EEGImageLatentAveragedDataset,
     EEGImageLatentDataset,
+    EEGLabelAveragedDataset,
+    EEGLabelDataset,
     ImageDataset,
 )
 from .dataloader import build_eeg_dataloader, build_image_dataloader
@@ -18,6 +20,8 @@ __all__ = [
     "EEGImageAveragedDataset",
     "EEGImageLatentDataset",
     "EEGImageLatentAveragedDataset",
+    "EEGLabelDataset",
+    "EEGLabelAveragedDataset",
     "ImageDataset",
     "build_eeg_dataloader",
     "build_image_dataloader",

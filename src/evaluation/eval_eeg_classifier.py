@@ -221,7 +221,7 @@ def evaluate_eeg_classifier(args: argparse.Namespace) -> dict[str, Any]:
         drop_last=False,
         eeg_zscore_stats=zscore_stats,
     )
-    sample_eeg, _sample_image, _sample_label = sample_loader.dataset[0]
+    sample_eeg, _sample_label = sample_loader.dataset[0]
     model = EEGClassifier20CNN(
         eeg_channels=int(sample_eeg.shape[0]),
         eeg_timesteps=int(sample_eeg.shape[1]),
@@ -247,7 +247,7 @@ def evaluate_eeg_classifier(args: argparse.Namespace) -> dict[str, Any]:
                 drop_last=False,
                 eeg_zscore_stats=zscore_stats,
             )
-            for eeg, _images, labels in loader:
+            for eeg, labels in loader:
                 if args.max_samples is not None and seen >= int(args.max_samples):
                     break
                 if args.max_samples is not None:

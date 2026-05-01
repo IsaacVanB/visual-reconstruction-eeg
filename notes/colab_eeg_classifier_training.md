@@ -66,7 +66,7 @@ occasionally create CUDA version mismatches.
 
 ### 5. Place the dataset
 
-The classifier expects this dataset structure:
+The classifier only needs the `THINGS_EEG_2` EEG directory:
 
 ```text
 <dataset_root>/
@@ -75,9 +75,6 @@ The classifier expects this dataset structure:
     sub-1/preprocessed_eeg_training.npy
     sub-2/preprocessed_eeg_training.npy
     ...
-  images_THINGS/
-    object_images/
-    ...
 ```
 
 For Drive-backed data, a common layout is:
@@ -85,10 +82,11 @@ For Drive-backed data, a common layout is:
 ```text
 /content/drive/MyDrive/eeg_data/datasets/
   THINGS_EEG_2/
-  images_THINGS/
 ```
 
 You can point training directly at this path with `--dataset-root`.
+The stimulus image directory is not required for classifier training or
+classifier confusion-matrix evaluation.
 
 ## Training From A Notebook
 
