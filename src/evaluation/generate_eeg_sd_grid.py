@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Any
@@ -66,13 +67,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sd-model-id", default="runwayml/stable-diffusion-v1-5")
     parser.add_argument("--latent-shape", type=int, nargs=3, default=[4, 64, 64])
     parser.add_argument("--decode-latent-scaling", choices=["auto", "divide", "none"], default="auto")
-    parser.add_argument("--output-dir", default="outputs/eeg_sd_grid")
+    parser.add_argument(
+        "--output-dir",
+        default="outputs/eeg_sd_grid",
+        help="Base output directory. A new run_* subdirectory is created inside it each run.",
+    )
     parser.add_argument("--max-samples", type=int, default=20)
     parser.add_argument("--image-size", type=int, default=512)
-    parser.add_argument("--strength", type=float, default=0.35)
+    parser.add_argument("--strength", type=float, default=0.8)
     parser.add_argument("--guidance-scale", type=float, default=7.5)
     parser.add_argument("--num-inference-steps", type=int, default=30)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=1022)
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument(
@@ -81,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prompt-template",
-        default="a photo of a {label}",
+        default="a realistic Mophotograph of a {label}",
         help="Template used for predicted classifier label prompts.",
     )
     parser.add_argument(
@@ -93,6 +98,16 @@ def parse_args() -> argparse.Namespace:
         "--correct-only",
         action="store_true",
         help="Only generate images for EEG samples where the classifier prediction is correct.",
+    )
+    parser.add_argument(
+        "--classifier-trial-mode",
+        choices=["average_trials", "individual_average_predictions", "individual_trials"],
+        default="average_trials",
+        help=(
+            "How to feed EEG to the classifier. 'average_trials' preserves the old behavior; "
+            "'individual_average_predictions' classifies each repeat and averages probabilities; "
+            "'individual_trials' keeps repeat predictions separate."
+        ),
     )
     return parser.parse_args()
 
@@ -256,28 +271,78 @@ def _load_ground_truth(image_path: Path, size: int) -> Image.Image:
         return img.convert("RGB").resize((size, size), resample=Image.BICUBIC)
 
 
-def _image_with_label(image: Image.Image, label: str, height: int = 28) -> Image.Image:
-    out = Image.new("RGB", (image.width, image.height + height), "white")
-    out.paste(image, (0, height))
-    draw = ImageDraw.Draw(out)
-    font = ImageFont.load_default()
-    text = label[:80]
-    bbox = draw.textbbox((0, 0), text, font=font)
-    draw.text(((image.width - (bbox[2] - bbox[0])) // 2, 8), text, fill="black", font=font)
-    return out
+def _load_font(size: int) -> ImageFont.ImageFont:
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except OSError:
+        return ImageFont.load_default()
 
 
-def _build_grid(rows: list[tuple[str, list[Image.Image]]]) -> Image.Image:
+def _fit_font_for_width(text: str, max_width: int, max_size: int, min_size: int = 12):
+    measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    for size in range(max_size, min_size - 1, -1):
+        font = _load_font(size)
+        bbox = measure_draw.textbbox((0, 0), text, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            return font
+    return _load_font(min_size)
+
+
+def _build_grid(
+    rows: list[tuple[str, list[Image.Image]]],
+    column_labels: list[str],
+) -> Image.Image:
     if not rows or not rows[0][1]:
         raise ValueError("No images available for grid.")
+    if len(column_labels) != len(rows[0][1]):
+        raise ValueError("column_labels length must match the number of grid columns.")
+
     cell_w, cell_h = rows[0][1][0].size
-    label_w = 150
-    canvas = Image.new("RGB", (label_w + len(rows[0][1]) * cell_w, len(rows) * cell_h), "white")
+    label_w = 120
+    header_h = 54
+    n_cols = len(rows[0][1])
+    canvas = Image.new(
+        "RGB",
+        (label_w + n_cols * cell_w, header_h + len(rows) * cell_h),
+        "white",
+    )
     draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
+
+    for col_idx, label in enumerate(column_labels):
+        x = label_w + col_idx * cell_w
+        header_text = label.replace("_", " ")
+        font = _fit_font_for_width(header_text, max_width=cell_w - 16, max_size=22)
+        bbox = draw.textbbox((0, 0), header_text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        draw.text(
+            (x + (cell_w - text_w) // 2, (header_h - text_h) // 2 - bbox[1]),
+            header_text,
+            fill="black",
+            font=font,
+        )
+
+    measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    row_font = _load_font(max(18, min(42, cell_h // 4)))
     for row_idx, (row_label, images) in enumerate(rows):
-        y = row_idx * cell_h
-        draw.text((10, y + 10), row_label, fill="black", font=font)
+        y = header_h + row_idx * cell_h
+        label_text = row_label.replace("_", " ")
+        bbox = measure_draw.textbbox((0, 0), label_text, font=row_font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        pad = 8
+        text_img = Image.new("RGBA", (text_w + 2 * pad, text_h + 2 * pad), (0, 0, 0, 0))
+        text_draw = ImageDraw.Draw(text_img)
+        text_draw.text((pad - bbox[0], pad - bbox[1]), label_text, fill=(0, 0, 0, 255), font=row_font)
+        rotated = text_img.rotate(90, expand=True)
+        canvas.paste(
+            rotated,
+            (
+                max(0, (label_w - rotated.width) // 2),
+                y + max(0, (cell_h - rotated.height) // 2),
+            ),
+            rotated,
+        )
         for col_idx, image in enumerate(images):
             canvas.paste(image, (label_w + col_idx * cell_w, y))
     return canvas
@@ -325,11 +390,91 @@ def _load_sd_pipelines(model_id: str, device: torch.device, fp16: bool):
     return text_pipe, img2img_pipe
 
 
+def _create_run_output_dir(base_output_dir: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = base_output_dir / f"run_{timestamp}"
+    suffix = 1
+    while run_dir.exists():
+        run_dir = base_output_dir / f"run_{timestamp}_{suffix:02d}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def _classify_sample(
+    classifier: EEGClassifier20CNN,
+    classifier_tf,
+    raw_dataset: EEGImageAveragedDataset,
+    image_index: int,
+    true_contiguous: int,
+    mode: str,
+    device: torch.device,
+) -> dict[str, Any]:
+    if mode == "average_trials":
+        eeg_avg = raw_dataset._average_repeats(image_index)
+        classifier_eeg = classifier_tf(eeg_avg).unsqueeze(0).to(device=device, dtype=torch.float32)
+        logits = classifier(classifier_eeg)
+        probs = torch.softmax(logits, dim=1)
+        pred_contiguous = int(probs.argmax(dim=1).item())
+        pred_prob = float(probs[0, pred_contiguous].item())
+        return {
+            "pred_contiguous": pred_contiguous,
+            "pred_prob": pred_prob,
+            "classifier_correct": bool(pred_contiguous == int(true_contiguous)),
+            "selected_rep_index": None,
+            "per_trial_predictions": [],
+            "per_trial_probs": [],
+        }
+
+    eeg_repeats = raw_dataset.eeg[image_index]
+    classifier_eeg = torch.stack(
+        [classifier_tf(eeg_repeats[rep_idx]) for rep_idx in range(raw_dataset.repetitions)],
+        dim=0,
+    ).to(device=device, dtype=torch.float32)
+    logits = classifier(classifier_eeg)
+    probs = torch.softmax(logits, dim=1)
+    per_trial_pred = probs.argmax(dim=1)
+    per_trial_conf = probs.gather(1, per_trial_pred.unsqueeze(1)).squeeze(1)
+    correct_mask = per_trial_pred == int(true_contiguous)
+
+    if mode == "individual_average_predictions":
+        avg_probs = probs.mean(dim=0)
+        pred_contiguous = int(avg_probs.argmax().item())
+        pred_prob = float(avg_probs[pred_contiguous].item())
+        selected_rep_index = None
+        classifier_correct = bool(pred_contiguous == int(true_contiguous))
+    elif mode == "individual_trials":
+        if bool(correct_mask.any().item()):
+            correct_indices = correct_mask.nonzero(as_tuple=False).flatten()
+            true_probs = probs[correct_indices, int(true_contiguous)]
+            selected_pos = int(true_probs.argmax().item())
+            selected_rep_index = int(correct_indices[selected_pos].item())
+            pred_contiguous = int(per_trial_pred[selected_rep_index].item())
+            pred_prob = float(per_trial_conf[selected_rep_index].item())
+            classifier_correct = True
+        else:
+            selected_rep_index = int(per_trial_conf.argmax().item())
+            pred_contiguous = int(per_trial_pred[selected_rep_index].item())
+            pred_prob = float(per_trial_conf[selected_rep_index].item())
+            classifier_correct = False
+    else:
+        raise ValueError(f"Unsupported classifier trial mode: {mode}")
+
+    return {
+        "pred_contiguous": pred_contiguous,
+        "pred_prob": pred_prob,
+        "classifier_correct": classifier_correct,
+        "selected_rep_index": selected_rep_index,
+        "per_trial_predictions": [int(x) for x in per_trial_pred.detach().cpu().tolist()],
+        "per_trial_probs": [float(x) for x in per_trial_conf.detach().cpu().tolist()],
+    }
+
+
 def main() -> None:
     args = parse_args()
     device = resolve_torch_device(args.device)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_base_dir = Path(args.output_dir)
+    output_dir = _create_run_output_dir(output_base_dir)
     intermediates_dir = output_dir / "intermediates"
     sd_label_dir = output_dir / "sd_label_only"
     sd_img2img_dir = output_dir / "sd_label_image"
@@ -440,15 +585,18 @@ def main() -> None:
     ground_truth_images: list[Image.Image] = []
     label_only_images: list[Image.Image] = []
     label_image_images: list[Image.Image] = []
+    column_labels: list[str] = []
     manifest_rows: list[dict[str, Any]] = []
 
     print(f"Classifier checkpoint: {classifier_checkpoint_path}")
     print(f"Encoder checkpoint: {encoder_checkpoint_path}")
+    print(f"Output directory: {output_dir}")
     print(f"Device: {device}")
     if args.correct_only:
         print(f"Generating up to {target_count} classifier-correct classifier20 test samples.")
     else:
         print(f"Generating {target_count} classifier20 test samples.")
+    print(f"Classifier trial mode: {args.classifier_trial_mode}")
 
     with torch.no_grad():
         considered = 0
@@ -463,17 +611,20 @@ def main() -> None:
             image_name = str(raw_dataset.train_img_files[image_index])
             image_path = resolve_image_path(image_root=image_root, image_name=image_name)
 
-            eeg_np = raw_dataset._average_repeats(image_index)
-            classifier_eeg = classifier_tf(eeg_np).unsqueeze(0).to(device=device, dtype=torch.float32)
-            encoder_eeg = encoder_tf(eeg_np).unsqueeze(0).to(device=device, dtype=torch.float32)
-
-            logits = classifier(classifier_eeg)
-            probs = torch.softmax(logits, dim=1)
-            pred_contiguous = int(logits.argmax(dim=1).item())
-            pred_prob = float(probs[0, pred_contiguous].item())
+            classifier_result = _classify_sample(
+                classifier=classifier,
+                classifier_tf=classifier_tf,
+                raw_dataset=raw_dataset,
+                image_index=image_index,
+                true_contiguous=int(true_contiguous),
+                mode=args.classifier_trial_mode,
+                device=device,
+            )
+            pred_contiguous = int(classifier_result["pred_contiguous"])
+            pred_prob = float(classifier_result["pred_prob"])
             pred_label = CLASSIFIER20_CLASS_NAMES[pred_contiguous]
             pred_class_id = int(CLASSIFIER20_CLASS_INDICES[pred_contiguous])
-            classifier_correct = bool(pred_contiguous == int(true_contiguous))
+            classifier_correct = bool(classifier_result["classifier_correct"])
             if args.correct_only and not classifier_correct:
                 print(
                     f"[skip {considered}/{len(raw_dataset)}] img={image_index} "
@@ -484,6 +635,8 @@ def main() -> None:
             sample_pos = len(manifest_rows)
             prompt = args.prompt_template.format(label=pred_label.replace("_", " "))
 
+            eeg_np = raw_dataset._average_repeats(image_index)
+            encoder_eeg = encoder_tf(eeg_np).unsqueeze(0).to(device=device, dtype=torch.float32)
             pred_pca = encoder(encoder_eeg)
             vae_recon = decode_from_pca_prediction(
                 pred_pca=pred_pca,
@@ -529,9 +682,13 @@ def main() -> None:
                 init_path = intermediates_dir / f"{base_name}_vae_recon.png"
                 init_image.save(init_path)
 
-            ground_truth_images.append(_image_with_label(gt_image, f"true: {true_label}"))
-            label_only_images.append(_image_with_label(label_image, f"pred: {pred_label}"))
-            label_image_images.append(_image_with_label(label_img2img, f"pred: {pred_label}"))
+            if pred_label == true_label:
+                column_labels.append(true_label)
+            else:
+                column_labels.append(f"{true_label} -> {pred_label}")
+            ground_truth_images.append(gt_image)
+            label_only_images.append(label_image)
+            label_image_images.append(label_img2img)
             manifest_rows.append(
                 {
                     "sample_pos": sample_pos,
@@ -543,6 +700,10 @@ def main() -> None:
                     "pred_label": pred_label,
                     "pred_prob": pred_prob,
                     "classifier_correct": classifier_correct,
+                    "classifier_trial_mode": args.classifier_trial_mode,
+                    "selected_rep_index": classifier_result["selected_rep_index"],
+                    "per_trial_predictions": json.dumps(classifier_result["per_trial_predictions"]),
+                    "per_trial_probs": json.dumps(classifier_result["per_trial_probs"]),
                     "prompt": prompt,
                     "seed": seed,
                     "label_only_path": str(label_only_path),
@@ -567,7 +728,8 @@ def main() -> None:
             ("Ground truth", ground_truth_images),
             ("Label only", label_only_images),
             ("Label + EEG image", label_image_images),
-        ]
+        ],
+        column_labels=column_labels,
     )
     grid_path = output_dir / "eeg_sd_grid.png"
     grid.save(grid_path)
@@ -584,6 +746,8 @@ def main() -> None:
             {
                 "classifier_checkpoint": str(classifier_checkpoint_path),
                 "encoder_checkpoint": str(encoder_checkpoint_path),
+                "output_base_dir": str(output_base_dir),
+                "output_dir": str(output_dir),
                 "dataset_root": dataset_root,
                 "subject": subject,
                 "split": "test",
@@ -600,6 +764,7 @@ def main() -> None:
                 "num_inference_steps": args.num_inference_steps,
                 "seed": args.seed,
                 "correct_only": bool(args.correct_only),
+                "classifier_trial_mode": args.classifier_trial_mode,
                 "samples": manifest_rows,
             },
             indent=2,
