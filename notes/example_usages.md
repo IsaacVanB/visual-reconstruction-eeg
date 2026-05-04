@@ -115,9 +115,16 @@ python scripts/train_eeg_classifier.py \
   --config configs/eeg_classifier.yaml \
   --subjects all \
   --batch-size 16 \
+  --subject-chunk-size 2 \
   --epochs 30 \
   --device cuda
 ```
+
+Per-epoch train/test evaluation is disabled by default for speed. Final test
+evaluation still runs once after training. Use `--evaluate-train-each-epoch` or
+`--evaluate-test-each-epoch` only when you need those diagnostics.
+For multi-subject runs, `--subject-chunk-size N` controls how many subject files
+are loaded together; higher values can be faster but use more RAM.
 
 ## Scripts
 
@@ -175,6 +182,7 @@ python scripts/train_eeg_classifier.py \
   --dataset-root datasets \
   --subjects all \
   --batch-size 16 \
+  --subject-chunk-size 2 \
   --epochs 30 \
   --output-dir outputs/eeg_classifier \
   --device cuda

@@ -232,6 +232,42 @@ Expected sample counts for `classifier20` with `sample_mode: repetitions`:
   test: 800
 ```
 
+You can trade RAM for speed by loading a few subjects at a time:
+
+```yaml
+subject_chunk_size: 2
+```
+
+or from the CLI:
+
+```bash
+--subject-chunk-size 2
+```
+
+Start with `1` on memory-constrained runtimes. Try `2` or `3` if Colab RAM has
+headroom. Setting this to `10` for ten-subject runs approximates all-at-once
+loading and can OOM.
+
+### Avoid extra full-dataset eval passes
+
+Classifier training now defaults to validation each epoch and final test once
+after training. This is much faster than running train/test evaluation every
+epoch over all subjects.
+
+Keep these disabled for normal Colab runs:
+
+```yaml
+evaluate_train_each_epoch: false
+evaluate_test_each_epoch: false
+```
+
+Enable them only for diagnostics:
+
+```bash
+--evaluate-train-each-epoch
+--evaluate-test-each-epoch
+```
+
 ### Save outputs to Drive
 
 Colab runtimes are temporary. Anything left only under `/content` can disappear

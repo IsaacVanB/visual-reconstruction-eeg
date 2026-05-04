@@ -19,7 +19,9 @@ from src.models import EEGClassifier20CNN
 from src.training.train_eeg_classifier import (
     EEGClassifierConfig,
     _discover_all_subjects,
+    _make_subject_chunk_loader_with_stats,
     _make_subject_loader_with_stats,
+    _subject_chunks,
 )
 from src.training.train_eeg_encoder import resolve_torch_device
 
@@ -44,6 +46,12 @@ def parse_args():
     parser.add_argument("--subjects", nargs="+", default=None, help="Override subjects from checkpoint.")
     parser.add_argument("--split-seed", type=int, default=None, help="Override split seed.")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size.")
+    parser.add_argument(
+        "--subject-chunk-size",
+        type=int,
+        default=None,
+        help="Override number of subjects to keep loaded at once.",
+    )
     parser.add_argument("--num-workers", type=int, default=None, help="Override num workers.")
     parser.add_argument(
         "--sample-mode",
@@ -90,6 +98,9 @@ def _config_from_checkpoint(
         if "subject" not in saved_cfg:
             raise ValueError("Checkpoint config is missing both 'subject' and 'subjects'.")
         saved_cfg["subjects"] = (str(saved_cfg["subject"]),)
+    saved_cfg.setdefault("evaluate_train_each_epoch", False)
+    saved_cfg.setdefault("evaluate_test_each_epoch", False)
+    saved_cfg.setdefault("subject_chunk_size", 1)
     allowed_fields = set(EEGClassifierConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in saved_cfg.items() if key in allowed_fields}
     missing = allowed_fields.difference(filtered.keys())
@@ -118,6 +129,8 @@ def _config_from_checkpoint(
         config.split_seed = int(args.split_seed)
     if args.batch_size is not None:
         config.batch_size = int(args.batch_size)
+    if args.subject_chunk_size is not None:
+        config.subject_chunk_size = max(1, int(args.subject_chunk_size))
     if args.num_workers is not None:
         config.num_workers = int(args.num_workers)
     if args.sample_mode is not None:
@@ -236,12 +249,12 @@ def evaluate_eeg_classifier(args: argparse.Namespace) -> dict[str, Any]:
     y_prob = []
     seen = 0
     with torch.no_grad():
-        for subject in config.subjects:
+        for subject_chunk in _subject_chunks(config.subjects, config.subject_chunk_size):
             if args.max_samples is not None and seen >= int(args.max_samples):
                 break
-            loader = _make_subject_loader_with_stats(
+            loader = _make_subject_chunk_loader_with_stats(
                 config=config,
-                subject=subject,
+                subjects=subject_chunk,
                 split=args.split,
                 shuffle=False,
                 drop_last=False,

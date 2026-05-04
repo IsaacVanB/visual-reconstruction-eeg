@@ -12,10 +12,20 @@ class_subset: classifier20
 
 # Optimization
 batch_size: 32
+# Number of subjects to keep loaded at once for multi-subject runs.
+# 1 minimizes RAM; 2-3 can be faster if RAM allows; 10 approximates all-at-once.
+subject_chunk_size: 1
 num_workers: 0
 lr: 0.0005
 weight_decay: 0.0
 epochs: 10
+
+# Speed/diagnostics:
+# - Final test evaluation always runs once after training.
+# - Enable these only when you need per-epoch diagnostics; they add full extra
+#   passes over all selected subjects.
+evaluate_train_each_epoch: false
+evaluate_test_each_epoch: false
 
 # L1 regularization on the first dense layer, matching the notebook's Dense(128) regularizer.
 l1_weight: 0.0005

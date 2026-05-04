@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 import yaml
 
 from src.data import EEGLabelAveragedDataset, EEGLabelDataset, build_eeg_transform
@@ -116,6 +116,9 @@ class EEGClassifierConfig:
     sample_mode: str
     k_repeats: Optional[int]
     pin_memory: bool
+    evaluate_train_each_epoch: bool
+    evaluate_test_each_epoch: bool
+    subject_chunk_size: int
 
 
 class ClassIndexToContiguousLabel:
@@ -307,6 +310,9 @@ def load_eeg_classifier_config(
         sample_mode=sample_mode,
         k_repeats=k_repeats,
         pin_memory=bool(data.get("pin_memory", False)),
+        evaluate_train_each_epoch=bool(data.get("evaluate_train_each_epoch", False)),
+        evaluate_test_each_epoch=bool(data.get("evaluate_test_each_epoch", False)),
+        subject_chunk_size=max(1, int(data.get("subject_chunk_size", 1))),
     )
 
 
@@ -409,14 +415,10 @@ def _compute_train_eeg_channel_stats(config: EEGClassifierConfig) -> dict[str, A
     }
 
 
-def _make_subject_loader_with_stats(
+def _build_classifier_eeg_transform(
     config: EEGClassifierConfig,
-    subject: str,
-    split: str,
-    shuffle: bool,
-    drop_last: bool,
     eeg_zscore_stats: Optional[dict[str, Any]],
-) -> DataLoader:
+):
     normalize_mode = str(config.eeg_normalization).lower()
     eeg_transform_kwargs = _get_eeg_transform_kwargs(config)
     if normalize_mode == "zscore":
@@ -430,13 +432,20 @@ def _make_subject_loader_with_stats(
             to_tensor=True,
             **eeg_transform_kwargs,
         )
-    else:
-        eeg_transform = build_eeg_transform(
-            normalize_mode=normalize_mode,
-            to_tensor=True,
-            **eeg_transform_kwargs,
-        )
+        return eeg_transform
+    return build_eeg_transform(
+        normalize_mode=normalize_mode,
+        to_tensor=True,
+        **eeg_transform_kwargs,
+    )
 
+
+def _make_subject_dataset_with_transform(
+    config: EEGClassifierConfig,
+    subject: str,
+    split: str,
+    eeg_transform,
+):
     target_transform = ClassIndexToContiguousLabel(config.class_indices)
     if config.sample_mode == "repetitions":
         dataset = EEGLabelDataset(
@@ -466,6 +475,35 @@ def _make_subject_loader_with_stats(
             f"No samples found for split={split!r}, subject={subject!r}, "
             f"class_subset={config.class_subset!r}."
         )
+    return dataset
+
+
+def _make_subject_chunk_loader_with_stats(
+    config: EEGClassifierConfig,
+    subjects: Sequence[str],
+    split: str,
+    shuffle: bool,
+    drop_last: bool,
+    eeg_zscore_stats: Optional[dict[str, Any]],
+) -> DataLoader:
+    subjects = tuple(str(subject) for subject in subjects)
+    if not subjects:
+        raise ValueError("subjects chunk must be non-empty.")
+
+    eeg_transform = _build_classifier_eeg_transform(
+        config=config,
+        eeg_zscore_stats=eeg_zscore_stats,
+    )
+    datasets = [
+        _make_subject_dataset_with_transform(
+            config=config,
+            subject=subject,
+            split=split,
+            eeg_transform=eeg_transform,
+        )
+        for subject in subjects
+    ]
+    dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
 
     return DataLoader(
         dataset,
@@ -476,6 +514,24 @@ def _make_subject_loader_with_stats(
         drop_last=drop_last,
         collate_fn=_eeg_classifier_collate,
         persistent_workers=config.num_workers > 0,
+    )
+
+
+def _make_subject_loader_with_stats(
+    config: EEGClassifierConfig,
+    subject: str,
+    split: str,
+    shuffle: bool,
+    drop_last: bool,
+    eeg_zscore_stats: Optional[dict[str, Any]],
+) -> DataLoader:
+    return _make_subject_chunk_loader_with_stats(
+        config=config,
+        subjects=(subject,),
+        split=split,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        eeg_zscore_stats=eeg_zscore_stats,
     )
 
 
@@ -578,6 +634,13 @@ def _merge_epoch_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
     }
 
 
+def _subject_chunks(subjects: Sequence[str], chunk_size: int):
+    chunk_size = max(1, int(chunk_size))
+    subjects = list(subjects)
+    for start in range(0, len(subjects), chunk_size):
+        yield subjects[start : start + chunk_size]
+
+
 def _run_epoch_over_subjects(
     model: EEGClassifier20CNN,
     config: EEGClassifierConfig,
@@ -596,10 +659,10 @@ def _run_epoch_over_subjects(
         subjects = rng.permutation(subjects).tolist()
 
     metrics = []
-    for subject in subjects:
-        loader = _make_subject_loader_with_stats(
+    for subject_chunk in _subject_chunks(subjects, config.subject_chunk_size):
+        loader = _make_subject_chunk_loader_with_stats(
             config=config,
-            subject=str(subject),
+            subjects=subject_chunk,
             split=split,
             shuffle=shuffle,
             drop_last=drop_last,
@@ -625,10 +688,10 @@ def _count_samples_for_split(
     eeg_zscore_stats: Optional[dict[str, Any]],
 ) -> int:
     total = 0
-    for subject in config.subjects:
-        loader = _make_subject_loader_with_stats(
+    for subject_chunk in _subject_chunks(config.subjects, config.subject_chunk_size):
+        loader = _make_subject_chunk_loader_with_stats(
             config=config,
-            subject=subject,
+            subjects=subject_chunk,
             split=split,
             shuffle=False,
             drop_last=False,
@@ -697,6 +760,9 @@ def _save_artifacts(
         "final_test_accuracy": history["test_accuracy"][-1],
         "best_valid_accuracy": max(history["valid_accuracy"]),
         "epochs": config.epochs,
+        "evaluate_train_each_epoch": bool(config.evaluate_train_each_epoch),
+        "evaluate_test_each_epoch": bool(config.evaluate_test_each_epoch),
+        "subject_chunk_size": int(config.subject_chunk_size),
     }
     summary_path = output_dir / f"classifier20_training_summary_{saved_at}.json"
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -812,6 +878,7 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
 
     print(f"Device: {device}")
     print(f"Subjects: {list(config.subjects)}")
+    print(f"Subject chunk size: {config.subject_chunk_size}")
     print(f"Class subset: {config.class_subset}")
     print(f"Class indices: {list(config.class_indices)}")
     print(f"Train samples: {train_samples}")
@@ -822,6 +889,8 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
     print(f"EEG normalization: {config.eeg_normalization}")
     print(f"Sample mode: {config.sample_mode}")
     print(f"k_repeats: {config.k_repeats}")
+    print(f"Evaluate train split each epoch: {config.evaluate_train_each_epoch}")
+    print(f"Evaluate test split each epoch: {config.evaluate_test_each_epoch}")
     if eeg_window is None:
         print("EEG time window: full epoch")
     else:
@@ -858,18 +927,20 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
             drop_last=True,
             epoch=epoch,
         )
-        train_eval_metrics = _run_epoch_over_subjects(
-            model=model,
-            config=config,
-            split="train",
-            device=device,
-            l1_weight=0.0,
-            eeg_zscore_stats=eeg_zscore_stats,
-            optimizer=None,
-            shuffle=False,
-            drop_last=False,
-            epoch=epoch,
-        )
+        train_eval_metrics = None
+        if config.evaluate_train_each_epoch:
+            train_eval_metrics = _run_epoch_over_subjects(
+                model=model,
+                config=config,
+                split="train",
+                device=device,
+                l1_weight=0.0,
+                eeg_zscore_stats=eeg_zscore_stats,
+                optimizer=None,
+                shuffle=False,
+                drop_last=False,
+                epoch=epoch,
+            )
         valid_metrics = _run_epoch_over_subjects(
             model=model,
             config=config,
@@ -882,28 +953,32 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
             drop_last=False,
             epoch=epoch,
         )
-        test_metrics = _run_epoch_over_subjects(
-            model=model,
-            config=config,
-            split="test",
-            device=device,
-            l1_weight=0.0,
-            eeg_zscore_stats=eeg_zscore_stats,
-            optimizer=None,
-            shuffle=False,
-            drop_last=False,
-            epoch=epoch,
-        )
+        test_metrics = None
+        if config.evaluate_test_each_epoch:
+            test_metrics = _run_epoch_over_subjects(
+                model=model,
+                config=config,
+                split="test",
+                device=device,
+                l1_weight=0.0,
+                eeg_zscore_stats=eeg_zscore_stats,
+                optimizer=None,
+                shuffle=False,
+                drop_last=False,
+                epoch=epoch,
+            )
 
         history["train_loss"].append(train_metrics["loss"])
         history["train_ce_loss"].append(train_metrics["ce_loss"])
         history["train_accuracy"].append(train_metrics["accuracy"])
-        history["train_eval_loss"].append(train_eval_metrics["loss"])
-        history["train_eval_accuracy"].append(train_eval_metrics["accuracy"])
+        if train_eval_metrics is not None:
+            history["train_eval_loss"].append(train_eval_metrics["loss"])
+            history["train_eval_accuracy"].append(train_eval_metrics["accuracy"])
         history["valid_loss"].append(valid_metrics["loss"])
         history["valid_accuracy"].append(valid_metrics["accuracy"])
-        history["test_loss"].append(test_metrics["loss"])
-        history["test_accuracy"].append(test_metrics["accuracy"])
+        if test_metrics is not None:
+            history["test_loss"].append(test_metrics["loss"])
+            history["test_accuracy"].append(test_metrics["accuracy"])
 
         if valid_metrics["accuracy"] > best_valid_accuracy:
             best_valid_accuracy = float(valid_metrics["accuracy"])
@@ -912,14 +987,38 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
                 k: v.detach().cpu().clone() for k, v in model.state_dict().items()
             }
 
-        print(
+        epoch_msg = (
             f"Epoch {epoch}/{config.epochs} | "
             f"train_loss={train_metrics['loss']:.6f} "
             f"train_acc={train_metrics['accuracy']:.4f} "
             f"valid_loss={valid_metrics['loss']:.6f} "
-            f"valid_acc={valid_metrics['accuracy']:.4f} "
-            f"test_acc={test_metrics['accuracy']:.4f}"
+            f"valid_acc={valid_metrics['accuracy']:.4f}"
         )
+        if train_eval_metrics is not None:
+            epoch_msg += f" train_eval_acc={train_eval_metrics['accuracy']:.4f}"
+        if test_metrics is not None:
+            epoch_msg += f" test_acc={test_metrics['accuracy']:.4f}"
+        print(epoch_msg)
+
+    final_test_metrics = _run_epoch_over_subjects(
+        model=model,
+        config=config,
+        split="test",
+        device=device,
+        l1_weight=0.0,
+        eeg_zscore_stats=eeg_zscore_stats,
+        optimizer=None,
+        shuffle=False,
+        drop_last=False,
+        epoch=config.epochs,
+    )
+    history["test_loss"].append(final_test_metrics["loss"])
+    history["test_accuracy"].append(final_test_metrics["accuracy"])
+    print(
+        "Final test | "
+        f"test_loss={final_test_metrics['loss']:.6f} "
+        f"test_acc={final_test_metrics['accuracy']:.4f}"
+    )
 
     artifact_paths = _save_artifacts(
         output_dir=output_dir,

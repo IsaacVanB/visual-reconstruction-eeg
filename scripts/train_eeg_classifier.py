@@ -17,6 +17,7 @@ def parse_args():
     parser.add_argument("--class-subset", choices=["classifier20"])
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--subject-chunk-size", type=int)
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight-decay", type=float)
@@ -31,6 +32,18 @@ def parse_args():
     parser.add_argument("--eeg-window-post-ms", type=float)
     parser.add_argument("--sample-mode", choices=["repetitions", "all", "random_k"])
     parser.add_argument("--k-repeats", type=int)
+    parser.add_argument(
+        "--evaluate-train-each-epoch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run a full train-split evaluation after each epoch.",
+    )
+    parser.add_argument(
+        "--evaluate-test-each-epoch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run test-split evaluation after each epoch. Final test is always evaluated once.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +56,7 @@ def main():
         "class_subset": args.class_subset,
         "split_seed": args.split_seed,
         "batch_size": args.batch_size,
+        "subject_chunk_size": args.subject_chunk_size,
         "num_workers": args.num_workers,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
@@ -57,6 +71,8 @@ def main():
         "eeg_window_post_ms": args.eeg_window_post_ms,
         "sample_mode": args.sample_mode,
         "k_repeats": args.k_repeats,
+        "evaluate_train_each_epoch": args.evaluate_train_each_epoch,
+        "evaluate_test_each_epoch": args.evaluate_test_each_epoch,
     }
     config = load_eeg_classifier_config(config_path=args.config, overrides=overrides)
     train_eeg_classifier(config)
