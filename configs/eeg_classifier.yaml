@@ -37,6 +37,19 @@ class_indices: [
 # from image_metadata.npy when possible.
 # class_names: [airplane, banana_peel, bowling_ball, broccoli, dog, doll, man, panda, pizza, tennis_ball, tiger]
 
+# Classifier architecture:
+# - cnn: existing notebook-style 2D CNN
+# - eegnet: compact EEGNet-style temporal + depthwise/separable conv model
+model_architecture: cnn
+cnn_hidden_dim: 128
+eegnet_f1: 8
+eegnet_d: 2
+# eegnet_f2 defaults to f1 * d when omitted
+# eegnet_f2: 16
+eegnet_kernel_length: 63
+eegnet_separable_kernel_length: 15
+eegnet_dropout: 0.25
+
 # Optimization
 batch_size: 32
 # Number of subjects to keep loaded at once for multi-subject runs.

@@ -1,5 +1,6 @@
 import argparse
 import csv
+from dataclasses import MISSING
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ import torch
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 
-from src.models import EEGClassifier20CNN
+from src.models import build_eeg_classifier_model, resolve_classifier_architecture_name
 from src.training.train_eeg_classifier import (
     EEGClassifierConfig,
     _discover_all_subjects,
@@ -99,6 +100,18 @@ def _config_from_checkpoint(
         if "subject" not in saved_cfg:
             raise ValueError("Checkpoint config is missing both 'subject' and 'subjects'.")
         saved_cfg["subjects"] = (str(saved_cfg["subject"]),)
+    saved_cfg.setdefault(
+        "model_architecture",
+        checkpoint.get("model_architecture", saved_cfg.get("model_architecture", "cnn")),
+    )
+    saved_cfg["model_architecture"] = resolve_classifier_architecture_name(saved_cfg["model_architecture"])
+    saved_cfg.setdefault("cnn_hidden_dim", 128)
+    saved_cfg.setdefault("eegnet_f1", 8)
+    saved_cfg.setdefault("eegnet_d", 2)
+    saved_cfg.setdefault("eegnet_f2", None)
+    saved_cfg.setdefault("eegnet_kernel_length", 63)
+    saved_cfg.setdefault("eegnet_separable_kernel_length", 15)
+    saved_cfg.setdefault("eegnet_dropout", 0.25)
     saved_cfg.setdefault("evaluate_train_each_epoch", False)
     saved_cfg.setdefault("evaluate_test_each_epoch", False)
     saved_cfg.setdefault("subject_chunk_size", 1)
@@ -106,7 +119,13 @@ def _config_from_checkpoint(
     saved_cfg.setdefault("compact_dataset", False)
     allowed_fields = set(EEGClassifierConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in saved_cfg.items() if key in allowed_fields}
-    missing = allowed_fields.difference(filtered.keys())
+    missing = {
+        key
+        for key, field in EEGClassifierConfig.__dataclass_fields__.items()
+        if key not in filtered
+        and field.default is MISSING
+        and field.default_factory is MISSING
+    }
     if missing:
         raise ValueError(
             "Checkpoint config is missing required classifier fields: "
@@ -243,10 +262,18 @@ def evaluate_eeg_classifier(args: argparse.Namespace) -> dict[str, Any]:
         eeg_zscore_stats=zscore_stats,
     )
     sample_eeg, _sample_label = sample_loader.dataset[0]
-    model = EEGClassifier20CNN(
+    model = build_eeg_classifier_model(
+        architecture=config.model_architecture,
         eeg_channels=int(sample_eeg.shape[0]),
         eeg_timesteps=int(sample_eeg.shape[1]),
         num_classes=int(config.num_classes),
+        cnn_hidden_dim=int(config.cnn_hidden_dim),
+        eegnet_f1=int(config.eegnet_f1),
+        eegnet_d=int(config.eegnet_d),
+        eegnet_f2=(int(config.eegnet_f2) if config.eegnet_f2 is not None else None),
+        eegnet_kernel_length=int(config.eegnet_kernel_length),
+        eegnet_separable_kernel_length=int(config.eegnet_separable_kernel_length),
+        eegnet_dropout=float(config.eegnet_dropout),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()

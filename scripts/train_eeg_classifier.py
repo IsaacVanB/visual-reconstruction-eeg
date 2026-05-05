@@ -9,7 +9,7 @@ from src.training import load_eeg_classifier_config, train_eeg_classifier
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train classifier20 EEG CNN classifier.")
+    parser = argparse.ArgumentParser(description="Train classifier20 EEG classifier.")
     parser.add_argument("--config", default="configs/eeg_classifier.yaml")
     parser.add_argument("--dataset-root")
     parser.add_argument("--subject")
@@ -21,6 +21,14 @@ def parse_args():
         type=int,
         help="Original THINGS zero-based class ids to train on. Overrides class_subset classes.",
     )
+    parser.add_argument("--model-architecture", choices=["cnn", "eegnet"])
+    parser.add_argument("--cnn-hidden-dim", type=int)
+    parser.add_argument("--eegnet-f1", type=int)
+    parser.add_argument("--eegnet-d", type=int)
+    parser.add_argument("--eegnet-f2", type=int)
+    parser.add_argument("--eegnet-kernel-length", type=int)
+    parser.add_argument("--eegnet-separable-kernel-length", type=int)
+    parser.add_argument("--eegnet-dropout", type=float)
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--subject-chunk-size", type=int)
@@ -61,6 +69,14 @@ def main():
         "subjects": args.subjects if args.subjects is not None else ([args.subject] if args.subject is not None else None),
         "class_subset": args.class_subset,
         "class_indices": args.class_indices,
+        "model_architecture": args.model_architecture,
+        "cnn_hidden_dim": args.cnn_hidden_dim,
+        "eegnet_f1": args.eegnet_f1,
+        "eegnet_d": args.eegnet_d,
+        "eegnet_f2": args.eegnet_f2,
+        "eegnet_kernel_length": args.eegnet_kernel_length,
+        "eegnet_separable_kernel_length": args.eegnet_separable_kernel_length,
+        "eegnet_dropout": args.eegnet_dropout,
         "split_seed": args.split_seed,
         "batch_size": args.batch_size,
         "subject_chunk_size": args.subject_chunk_size,

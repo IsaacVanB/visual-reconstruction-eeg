@@ -17,7 +17,11 @@ import yaml
 
 from src.data import EEGLabelAveragedDataset, EEGLabelDataset, build_eeg_transform
 from src.data.transforms import crop_eeg_time_window, resolve_eeg_time_window
-from src.models import EEGClassifier20CNN, extract_eeg_classifier20_arch_metadata
+from src.models import (
+    build_eeg_classifier_model,
+    extract_eeg_classifier20_arch_metadata,
+    resolve_classifier_architecture_name,
+)
 from src.training.train_eeg_encoder import resolve_torch_device
 
 
@@ -121,6 +125,14 @@ class EEGClassifierConfig:
     evaluate_train_each_epoch: bool
     evaluate_test_each_epoch: bool
     subject_chunk_size: int
+    model_architecture: str = "cnn"
+    cnn_hidden_dim: int = 128
+    eegnet_f1: int = 8
+    eegnet_d: int = 2
+    eegnet_f2: Optional[int] = None
+    eegnet_kernel_length: int = 63
+    eegnet_separable_kernel_length: int = 15
+    eegnet_dropout: float = 0.25
 
 
 class ClassIndexToContiguousLabel:
@@ -376,6 +388,27 @@ def load_eeg_classifier_config(
             "eeg_normalization must be one of "
             f"{sorted(SUPPORTED_EEG_NORMALIZATION)}, got: {eeg_normalization}"
         )
+    model_architecture = resolve_classifier_architecture_name(data.get("model_architecture", "cnn"))
+    cnn_hidden_dim = int(data.get("cnn_hidden_dim", 128))
+    eegnet_f1 = int(data.get("eegnet_f1", 8))
+    eegnet_d = int(data.get("eegnet_d", 2))
+    eegnet_f2_raw = data.get("eegnet_f2", None)
+    eegnet_f2 = int(eegnet_f2_raw) if eegnet_f2_raw is not None else None
+    eegnet_kernel_length = int(data.get("eegnet_kernel_length", 63))
+    eegnet_separable_kernel_length = int(data.get("eegnet_separable_kernel_length", 15))
+    eegnet_dropout = float(data.get("eegnet_dropout", 0.25))
+    if cnn_hidden_dim <= 0:
+        raise ValueError(f"cnn_hidden_dim must be positive, got: {cnn_hidden_dim}")
+    if eegnet_f1 <= 0 or eegnet_d <= 0:
+        raise ValueError(f"eegnet_f1 and eegnet_d must be positive, got: {eegnet_f1}, {eegnet_d}")
+    if eegnet_f2 is not None and eegnet_f2 <= 0:
+        raise ValueError(f"eegnet_f2 must be positive when set, got: {eegnet_f2}")
+    if eegnet_kernel_length <= 0 or eegnet_separable_kernel_length <= 0:
+        raise ValueError(
+            "eegnet_kernel_length and eegnet_separable_kernel_length must be positive."
+        )
+    if not 0.0 <= eegnet_dropout < 1.0:
+        raise ValueError(f"eegnet_dropout must be in [0.0, 1.0), got: {eegnet_dropout}")
 
     sample_mode = str(data["sample_mode"]).lower()
     if sample_mode not in SUPPORTED_SAMPLE_MODES:
@@ -477,6 +510,14 @@ def load_eeg_classifier_config(
         evaluate_train_each_epoch=bool(data.get("evaluate_train_each_epoch", False)),
         evaluate_test_each_epoch=bool(data.get("evaluate_test_each_epoch", False)),
         subject_chunk_size=max(1, int(data.get("subject_chunk_size", 1))),
+        model_architecture=model_architecture,
+        cnn_hidden_dim=cnn_hidden_dim,
+        eegnet_f1=eegnet_f1,
+        eegnet_d=eegnet_d,
+        eegnet_f2=eegnet_f2,
+        eegnet_kernel_length=eegnet_kernel_length,
+        eegnet_separable_kernel_length=eegnet_separable_kernel_length,
+        eegnet_dropout=eegnet_dropout,
     )
 
 
@@ -734,7 +775,7 @@ def _eeg_classifier_collate(batch):
 
 
 def _run_epoch(
-    model: EEGClassifier20CNN,
+    model: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
     l1_weight: float,
@@ -806,7 +847,7 @@ def _subject_chunks(subjects: Sequence[str], chunk_size: int):
 
 
 def _run_epoch_over_subjects(
-    model: EEGClassifier20CNN,
+    model: torch.nn.Module,
     config: EEGClassifierConfig,
     split: str,
     device: torch.device,
@@ -871,7 +912,7 @@ def _save_artifacts(
     output_dir: Path,
     config: EEGClassifierConfig,
     history: dict[str, list[float]],
-    model: EEGClassifier20CNN,
+    model: torch.nn.Module,
     best_model_state_dict: Optional[dict[str, torch.Tensor]],
     best_epoch: Optional[int],
     best_valid_accuracy: Optional[float],
@@ -881,9 +922,11 @@ def _save_artifacts(
     ckpt_path = output_dir / f"eeg_classifier20_{saved_at}.pt"
     best_ckpt_path = output_dir / f"eeg_classifier20_best_{saved_at}.pt"
     arch_metadata = extract_eeg_classifier20_arch_metadata(model)
-    model_architecture_name = model.__class__.__name__
+    model_class_name = model.__class__.__name__
+    model_architecture_name = resolve_classifier_architecture_name(config.model_architecture)
     config_payload = dict(config.__dict__)
     config_payload["model_architecture"] = model_architecture_name
+    config_payload["model_class_name"] = model_class_name
     config_payload["model_architecture_params"] = arch_metadata
     if eeg_zscore_stats is not None:
         config_payload["eeg_zscore_mean"] = eeg_zscore_stats["mean"]
@@ -896,6 +939,7 @@ def _save_artifacts(
         "class_indices": list(config.class_indices),
         "class_names": list(config.class_names),
         "model_architecture": model_architecture_name,
+        "model_class_name": model_class_name,
         "model_architecture_params": arch_metadata,
         "eeg_zscore_stats": eeg_zscore_stats,
         "saved_at": saved_at,
@@ -1029,18 +1073,43 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
         eeg_zscore_stats=eeg_zscore_stats,
     )
 
-    model = EEGClassifier20CNN(
+    model = build_eeg_classifier_model(
+        architecture=config.model_architecture,
         eeg_channels=eeg_channels,
         eeg_timesteps=eeg_timesteps,
         num_classes=config.num_classes,
+        cnn_hidden_dim=config.cnn_hidden_dim,
+        eegnet_f1=config.eegnet_f1,
+        eegnet_d=config.eegnet_d,
+        eegnet_f2=config.eegnet_f2,
+        eegnet_kernel_length=config.eegnet_kernel_length,
+        eegnet_separable_kernel_length=config.eegnet_separable_kernel_length,
+        eegnet_dropout=config.eegnet_dropout,
     ).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config.lr,
         weight_decay=config.weight_decay,
     )
+    resolved_model_architecture = resolve_classifier_architecture_name(config.model_architecture)
+    resolved_eegnet_f2 = (
+        int(config.eegnet_f2)
+        if config.eegnet_f2 is not None
+        else int(config.eegnet_f1) * int(config.eegnet_d)
+    )
 
     print(f"Device: {device}")
+    print(f"Model architecture: {resolved_model_architecture}")
+    if resolved_model_architecture == "cnn":
+        print(f"CNN hidden dim: {config.cnn_hidden_dim}")
+    else:
+        print(
+            "EEGNet params: "
+            f"F1={config.eegnet_f1}, D={config.eegnet_d}, F2={resolved_eegnet_f2}, "
+            f"kernel={config.eegnet_kernel_length}, "
+            f"separable_kernel={config.eegnet_separable_kernel_length}, "
+            f"dropout={config.eegnet_dropout}"
+        )
     print(f"Subjects: {list(config.subjects)}")
     print(f"Subject chunk size: {config.subject_chunk_size}")
     print(f"Class subset: {config.class_subset}")
