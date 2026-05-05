@@ -32,8 +32,6 @@ from src.evaluation.eeg_eval_core import (
 )
 from src.models import EEGClassifier20CNN
 from src.training.train_eeg_classifier import (
-    CLASSIFIER20_CLASS_INDICES,
-    CLASSIFIER20_CLASS_NAMES,
     EEGClassifierConfig,
     ClassIndexToContiguousLabel,
     _resolve_dataset_class_indices,
@@ -83,6 +81,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--lpips-net", default="alex", choices=["alex", "vgg", "squeeze"])
+    parser.add_argument(
+        "--ssim-permutation-test-permutations",
+        type=int,
+        default=10_000,
+        help="Number of random sign-flip permutations for the paired one-sided SSIM test.",
+    )
+    parser.add_argument(
+        "--ssim-permutation-test-seed",
+        type=int,
+        default=0,
+        help="Random seed for the paired one-sided SSIM permutation test.",
+    )
     parser.add_argument(
         "--negative-prompt",
         default="low quality, blurry, distorted, deformed",
@@ -166,6 +176,9 @@ def _classifier_config_from_checkpoint(
         saved_cfg["subjects"] = (str(saved_cfg.get("subject", "sub-1")),)
     saved_cfg.setdefault("dataset_class_indices", saved_cfg.get("class_indices"))
     saved_cfg.setdefault("compact_dataset", False)
+    saved_cfg.setdefault("evaluate_train_each_epoch", False)
+    saved_cfg.setdefault("evaluate_test_each_epoch", False)
+    saved_cfg.setdefault("subject_chunk_size", 1)
     allowed = set(EEGClassifierConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in saved_cfg.items() if key in allowed}
     missing = allowed.difference(filtered.keys())
@@ -305,6 +318,61 @@ def _load_lpips_metric(net: str, device: torch.device):
         raise ImportError("lpips is required for LPIPS. Install with: pip install lpips") from exc
 
     return lpips.LPIPS(net=net).to(device).eval()
+
+
+def paired_permutation_test_greater(
+    ssim_features,
+    ssim_label_only,
+    n_permutations: int = 10_000,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """
+    One-sided paired permutation test.
+
+    H0: mean(ssim_features - ssim_label_only) <= 0
+    H1: mean(ssim_features - ssim_label_only) > 0
+    """
+    if n_permutations < 1:
+        raise ValueError("n_permutations must be >= 1.")
+
+    ssim_features = np.asarray(ssim_features, dtype=float)
+    ssim_label_only = np.asarray(ssim_label_only, dtype=float)
+
+    if ssim_features.shape != ssim_label_only.shape:
+        raise ValueError("ssim_features and ssim_label_only must have the same shape.")
+    if ssim_features.ndim != 1:
+        raise ValueError("Inputs should be 1D arrays of matched SSIM scores.")
+
+    valid = np.isfinite(ssim_features) & np.isfinite(ssim_label_only)
+    ssim_features = ssim_features[valid]
+    ssim_label_only = ssim_label_only[valid]
+    if len(ssim_features) == 0:
+        raise ValueError("No valid paired SSIM scores remain after removing NaNs/Infs.")
+
+    differences = ssim_features - ssim_label_only
+    observed_mean_diff = np.mean(differences)
+    rng = np.random.default_rng(seed)
+
+    permuted_mean_diffs = np.empty(n_permutations, dtype=float)
+    for i in range(n_permutations):
+        signs = rng.choice([-1, 1], size=len(differences))
+        permuted_mean_diffs[i] = np.mean(signs * differences)
+
+    p_value = (np.sum(permuted_mean_diffs >= observed_mean_diff) + 1) / (
+        n_permutations + 1
+    )
+
+    return {
+        "n": int(len(differences)),
+        "observed_mean_ssim_features": float(np.mean(ssim_features)),
+        "observed_mean_ssim_label_only": float(np.mean(ssim_label_only)),
+        "observed_mean_difference": float(observed_mean_diff),
+        "p_value_one_sided": float(p_value),
+        "n_permutations": int(n_permutations),
+        "seed": int(seed),
+        "alternative": "mean(ssim_label_image - ssim_label_only) > 0",
+        "alpha_0_05_significant": bool(p_value < 0.05),
+    }
 
 
 def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -608,12 +676,14 @@ def main() -> None:
     )
     classifier_stats = _classifier_zscore_stats(classifier_ckpt, classifier_config)
     classifier_tf = _classifier_transform(classifier_config, classifier_stats)
-    classifier_target_tf = ClassIndexToContiguousLabel(CLASSIFIER20_CLASS_INDICES)
+    classifier_class_indices = tuple(int(x) for x in classifier_config.class_indices)
+    classifier_class_names = tuple(str(x) for x in classifier_config.class_names)
+    classifier_target_tf = ClassIndexToContiguousLabel(classifier_class_indices)
 
     dataset_root, latent_root, subject, split_seed = _resolve_encoder_inputs(
         saved_cfg=encoder_cfg,
         ckpt=encoder_ckpt,
-        dataset_root=args.dataset_root or classifier_config.dataset_root,
+        dataset_root=args.dataset_root,
         latent_root=args.latent_root,
         subject=args.subject,
         split_seed=args.split_seed,
@@ -623,7 +693,7 @@ def main() -> None:
         dataset_root=dataset_root,
         subject=subject,
         split="test",
-        class_indices=CLASSIFIER20_CLASS_INDICES,
+        class_indices=classifier_class_indices,
         transform=None,
         split_seed=split_seed,
         averaging_mode="all",
@@ -638,7 +708,7 @@ def main() -> None:
     if missing:
         print(f"Warning: skipped {len(missing)} missing ground-truth test images.")
     if len(raw_dataset) == 0:
-        raise RuntimeError("No classifier20 test samples remain after filtering.")
+        raise RuntimeError("No classifier test samples remain after filtering.")
 
     sample_eeg_np = raw_dataset._average_repeats(int(raw_dataset._avg_sample_index[0]))
     sample_classifier_eeg = classifier_tf(sample_eeg_np)
@@ -704,9 +774,9 @@ def main() -> None:
     print(f"Output directory: {output_dir}")
     print(f"Device: {device}")
     if args.correct_only:
-        print(f"Generating up to {target_count} classifier-correct classifier20 test samples.")
+        print(f"Generating up to {target_count} classifier-correct test samples.")
     else:
-        print(f"Generating {target_count} classifier20 test samples.")
+        print(f"Generating {target_count} classifier test samples.")
     print(f"Classifier trial mode: {args.classifier_trial_mode}")
 
     with torch.no_grad():
@@ -718,7 +788,7 @@ def main() -> None:
             image_index = int(image_index)
             true_class_id = image_index // int(raw_dataset.images_per_class)
             true_contiguous = classifier_target_tf(true_class_id)
-            true_label = CLASSIFIER20_CLASS_NAMES[int(true_contiguous)]
+            true_label = classifier_class_names[int(true_contiguous)]
             image_name = str(raw_dataset.train_img_files[image_index])
             image_path = resolve_image_path(image_root=image_root, image_name=image_name)
 
@@ -733,8 +803,8 @@ def main() -> None:
             )
             pred_contiguous = int(classifier_result["pred_contiguous"])
             pred_prob = float(classifier_result["pred_prob"])
-            pred_label = CLASSIFIER20_CLASS_NAMES[pred_contiguous]
-            pred_class_id = int(CLASSIFIER20_CLASS_INDICES[pred_contiguous])
+            pred_label = classifier_class_names[pred_contiguous]
+            pred_class_id = int(classifier_class_indices[pred_contiguous])
             classifier_correct = bool(classifier_result["classifier_correct"])
             if args.correct_only and not classifier_correct:
                 print(
@@ -884,6 +954,13 @@ def main() -> None:
                 f"{len(manifest_rows)} of {target_count}."
             )
 
+    ssim_permutation_results = paired_permutation_test_greater(
+        ssim_features=[row["ssim_label_image"] for row in manifest_rows],
+        ssim_label_only=[row["ssim_label_only"] for row in manifest_rows],
+        n_permutations=args.ssim_permutation_test_permutations,
+        seed=args.ssim_permutation_test_seed,
+    )
+
     grid = _build_grid(
         [
             ("Ground truth", ground_truth_images),
@@ -906,6 +983,9 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(manifest_rows)
 
+    ssim_permutation_path = output_dir / "ssim_paired_permutation_test.json"
+    ssim_permutation_path.write_text(json.dumps(ssim_permutation_results, indent=2))
+
     json_path = output_dir / "run_metadata.json"
     json_path.write_text(
         json.dumps(
@@ -918,7 +998,8 @@ def main() -> None:
                 "subject": subject,
                 "split": "test",
                 "split_seed": split_seed,
-                "class_indices": CLASSIFIER20_CLASS_INDICES,
+                "class_indices": list(classifier_class_indices),
+                "class_names": list(classifier_class_names),
                 "pca_params_path": str(pca_params_path),
                 "vae_name": args.vae_name,
                 "sd_model_id": args.sd_model_id,
@@ -930,6 +1011,7 @@ def main() -> None:
                 "num_inference_steps": args.num_inference_steps,
                 "seed": args.seed,
                 "lpips_net": args.lpips_net,
+                "ssim_permutation_test": ssim_permutation_results,
                 "correct_only": bool(args.correct_only),
                 "classifier_trial_mode": args.classifier_trial_mode,
                 "samples": manifest_rows,
@@ -939,6 +1021,13 @@ def main() -> None:
     )
     print(f"Saved grid: {grid_path}")
     print(f"Saved manifest: {csv_path}")
+    print(f"Saved SSIM paired permutation test: {ssim_permutation_path}")
+    print(
+        "SSIM label+image vs label-only paired permutation test: "
+        f"mean_diff={ssim_permutation_results['observed_mean_difference']:.6f}, "
+        f"p={ssim_permutation_results['p_value_one_sided']:.6f}, "
+        f"n={ssim_permutation_results['n']}"
+    )
     print(f"Saved metadata: {json_path}")
 
 
