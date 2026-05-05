@@ -15,11 +15,13 @@ def parse_args():
     parser.add_argument("--image-latent-root")
     parser.add_argument("--latent-root")
     parser.add_argument("--subject")
+    parser.add_argument("--subjects", nargs="+")
     parser.add_argument("--class-subset", choices=["default100", "default1000", "all"])
     parser.add_argument("--class-indices", type=int, nargs="+")
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--output-dim", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--subject-chunk-size", type=int)
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--lr", type=float)
     parser.add_argument("--weight-decay", type=float)
@@ -44,11 +46,17 @@ def main():
         "image_latent_root": args.image_latent_root,
         "latent_root": args.latent_root,
         "subject": args.subject,
+        "subjects": (
+            args.subjects
+            if args.subjects is not None
+            else ([args.subject] if args.subject is not None else None)
+        ),
         "class_subset": args.class_subset,
         "class_indices": args.class_indices,
         "split_seed": args.split_seed,
         "output_dim": args.output_dim,
         "batch_size": args.batch_size,
+        "subject_chunk_size": args.subject_chunk_size,
         "num_workers": args.num_workers,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
