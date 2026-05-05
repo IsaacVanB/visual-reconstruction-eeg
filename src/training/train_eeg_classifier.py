@@ -136,6 +136,8 @@ class ClassIndexToContiguousLabel:
 
 def _validate_required_config_keys(data: dict[str, Any], config_path: str) -> None:
     missing = [key for key in REQUIRED_CONFIG_KEYS if key not in data]
+    if "class_subset" in missing and data.get("class_indices", None) is not None:
+        missing.remove("class_subset")
     if "subject" not in data and "subjects" not in data:
         missing.append("subject or subjects")
     if missing:
@@ -357,14 +359,15 @@ def load_eeg_classifier_config(
                 data[key] = value
     _validate_required_config_keys(data=data, config_path=config_path)
 
-    class_subset = str(data["class_subset"]).lower()
-    if class_subset not in SUPPORTED_CLASS_SUBSETS:
-        raise ValueError(
-            f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
-        )
     if data.get("class_indices", None) is not None:
+        class_subset = str(data.get("class_subset", "custom")).lower()
         class_indices = _validate_class_indices(data["class_indices"])
     else:
+        class_subset = str(data["class_subset"]).lower()
+        if class_subset not in SUPPORTED_CLASS_SUBSETS:
+            raise ValueError(
+                f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
+            )
         class_indices = _resolve_classifier_class_indices(class_subset)
 
     eeg_normalization = str(data["eeg_normalization"]).lower()
