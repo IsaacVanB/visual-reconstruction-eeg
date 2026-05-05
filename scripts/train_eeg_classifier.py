@@ -15,6 +15,12 @@ def parse_args():
     parser.add_argument("--subject")
     parser.add_argument("--subjects", nargs="+")
     parser.add_argument("--class-subset", choices=["classifier20"])
+    parser.add_argument(
+        "--class-indices",
+        nargs="+",
+        type=int,
+        help="Original THINGS zero-based class ids to train on. Overrides class_subset classes.",
+    )
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--subject-chunk-size", type=int)
@@ -54,6 +60,7 @@ def main():
         "subject": args.subject,
         "subjects": args.subjects if args.subjects is not None else ([args.subject] if args.subject is not None else None),
         "class_subset": args.class_subset,
+        "class_indices": args.class_indices,
         "split_seed": args.split_seed,
         "batch_size": args.batch_size,
         "subject_chunk_size": args.subject_chunk_size,

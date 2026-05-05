@@ -36,6 +36,7 @@ from src.training.train_eeg_classifier import (
     CLASSIFIER20_CLASS_NAMES,
     EEGClassifierConfig,
     ClassIndexToContiguousLabel,
+    _resolve_dataset_class_indices,
 )
 
 
@@ -163,6 +164,8 @@ def _classifier_config_from_checkpoint(
     saved_cfg = dict(checkpoint.get("config", {}))
     if "subjects" not in saved_cfg:
         saved_cfg["subjects"] = (str(saved_cfg.get("subject", "sub-1")),)
+    saved_cfg.setdefault("dataset_class_indices", saved_cfg.get("class_indices"))
+    saved_cfg.setdefault("compact_dataset", False)
     allowed = set(EEGClassifierConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in saved_cfg.items() if key in allowed}
     missing = allowed.difference(filtered.keys())
@@ -179,6 +182,11 @@ def _classifier_config_from_checkpoint(
         config.subjects = (str(subject),)
     if split_seed is not None:
         config.split_seed = int(split_seed)
+    config.dataset_class_indices, config.compact_dataset = _resolve_dataset_class_indices(
+        dataset_root=config.dataset_root,
+        subject=config.subjects[0],
+        class_indices=config.class_indices,
+    )
     return config
 
 

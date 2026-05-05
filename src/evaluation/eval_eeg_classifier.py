@@ -21,6 +21,7 @@ from src.training.train_eeg_classifier import (
     _discover_all_subjects,
     _make_subject_chunk_loader_with_stats,
     _make_subject_loader_with_stats,
+    _resolve_dataset_class_indices,
     _subject_chunks,
 )
 from src.training.train_eeg_encoder import resolve_torch_device
@@ -101,6 +102,8 @@ def _config_from_checkpoint(
     saved_cfg.setdefault("evaluate_train_each_epoch", False)
     saved_cfg.setdefault("evaluate_test_each_epoch", False)
     saved_cfg.setdefault("subject_chunk_size", 1)
+    saved_cfg.setdefault("dataset_class_indices", saved_cfg.get("class_indices"))
+    saved_cfg.setdefault("compact_dataset", False)
     allowed_fields = set(EEGClassifierConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in saved_cfg.items() if key in allowed_fields}
     missing = allowed_fields.difference(filtered.keys())
@@ -139,6 +142,11 @@ def _config_from_checkpoint(
         config.k_repeats = int(args.k_repeats)
     if args.device is not None:
         config.device = str(args.device)
+    config.dataset_class_indices, config.compact_dataset = _resolve_dataset_class_indices(
+        dataset_root=config.dataset_root,
+        subject=config.subjects[0],
+        class_indices=config.class_indices,
+    )
     return config
 
 

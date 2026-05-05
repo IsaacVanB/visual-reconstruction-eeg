@@ -77,6 +77,37 @@ python scripts/train_eeg_classifier.py \
   --device cuda
 ```
 
+Create compact classifier20 EEG files for compact-dataset experiments:
+```bash
+python scripts/extract_compact_eeg.py \
+  --dataset-root datasets \
+  --output-root datasets_classifier20/THINGS_EEG_2 \
+  --subjects all \
+  --class-indices 9 525 59 159 178 436 408 431 853 435 615 977 1055 779 1627 1219 1319 277 1461 1476
+```
+
+Train from the compact files by pointing `--dataset-root` at the compact root:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --dataset-root datasets_classifier20 \
+  --subjects all \
+  --output-dir outputs/eeg_classifier \
+  --device cuda
+```
+
+Train on a selected subset from a larger compact dataset by passing original
+THINGS zero-based class ids:
+```bash
+python scripts/train_eeg_classifier.py \
+  --config configs/eeg_classifier.yaml \
+  --dataset-root datasets_classifier20 \
+  --subjects all \
+  --class-indices 1055 9 178 853 435 1476 1461 59 431 977 114 159 28 374 596 633 146 1246 390 1314 \
+  --output-dir outputs/eeg_classifier \
+  --device cuda
+```
+
 Classifier training writes each run to:
 ```text
 outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/
@@ -220,6 +251,19 @@ python scripts/eval_eeg_classifier.py \
   --split test \
   --max-samples 16 \
   --device cuda
+```
+
+`scripts/extract_compact_eeg.py`  
+Extract selected THINGS EEG classes into smaller per-subject `.npy` files.
+Each output file keeps the same `preprocessed_eeg_data` key and adds compact
+`labels`, `original_labels`, `original_image_indices`, and
+`original_class_indices` metadata.
+```bash
+python scripts/extract_compact_eeg.py \
+  --dataset-root datasets \
+  --output-root datasets_classifier20/THINGS_EEG_2 \
+  --subjects sub-1 sub-2 \
+  --class-indices 9 525 59 159 178 436 408 431 853 435 615 977 1055 779 1627 1219 1319 277 1461 1476
 ```
 
 `scripts/run_eeg_encoder_experiment.sh`  

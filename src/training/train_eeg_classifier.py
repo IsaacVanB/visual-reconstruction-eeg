@@ -93,8 +93,10 @@ class EEGClassifierConfig:
     split_seed: int
     class_subset: str
     class_indices: Sequence[int]
+    dataset_class_indices: Sequence[int]
     class_names: Sequence[str]
     num_classes: int
+    compact_dataset: bool
     batch_size: int
     num_workers: int
     lr: float
@@ -143,11 +145,96 @@ def _validate_required_config_keys(data: dict[str, Any], config_path: str) -> No
         )
 
 
-def _resolve_classifier_class_indices(class_subset: str) -> tuple[list[int], list[str]]:
+def _validate_class_indices(class_indices: Sequence[int]) -> list[int]:
+    resolved = [int(x) for x in class_indices]
+    if not resolved:
+        raise ValueError("class_indices must contain at least one class id.")
+    if len(set(resolved)) != len(resolved):
+        raise ValueError("class_indices contains duplicates.")
+    if any(class_idx < 0 for class_idx in resolved):
+        raise ValueError("class_indices must be non-negative.")
+    return resolved
+
+
+def _resolve_classifier_class_indices(class_subset: str) -> list[int]:
     subset = str(class_subset).lower()
     if subset != "classifier20":
         raise ValueError(f"class_subset must be 'classifier20', got: {class_subset}")
-    return list(CLASSIFIER20_CLASS_INDICES), list(CLASSIFIER20_CLASS_NAMES)
+    return list(CLASSIFIER20_CLASS_INDICES)
+
+
+def _extract_class_name_from_train_file(value: Any) -> str:
+    name = Path(str(value)).name
+    stem = Path(name).stem
+    if "_" in stem:
+        return stem.rsplit("_", 1)[0]
+    return stem
+
+
+def _load_image_metadata(dataset_root: str) -> dict[str, Any] | None:
+    metadata_path = Path(dataset_root) / "THINGS_EEG_2" / "image_metadata.npy"
+    if not metadata_path.exists():
+        return None
+    metadata = np.load(metadata_path, allow_pickle=True)
+    if isinstance(metadata, np.ndarray) and metadata.dtype == object and metadata.ndim == 0:
+        metadata = metadata.item()
+    if not isinstance(metadata, dict):
+        raise TypeError(f"Expected image metadata dict at {metadata_path}, got {type(metadata)}")
+    return metadata
+
+
+def _resolve_class_names(
+    dataset_root: str,
+    subject: str,
+    class_indices: Sequence[int],
+    provided_class_names: Optional[Sequence[str]] = None,
+) -> list[str]:
+    class_indices = _validate_class_indices(class_indices)
+    if provided_class_names is not None:
+        names = [str(name) for name in provided_class_names]
+        if len(names) != len(class_indices):
+            raise ValueError(
+                f"class_names length ({len(names)}) must match class_indices length ({len(class_indices)})."
+            )
+        return names
+
+    known_names = {
+        int(class_idx): str(name)
+        for class_idx, name in zip(CLASSIFIER20_CLASS_INDICES, CLASSIFIER20_CLASS_NAMES)
+    }
+    class_names_by_id: dict[int, str] = dict(known_names)
+    metadata = _load_image_metadata(dataset_root)
+    if metadata is not None and "train_img_files" in metadata:
+        train_img_files = np.asarray(metadata["train_img_files"])
+        images_per_class = 10
+
+        try:
+            payload = _load_subject_eeg_payload(dataset_root=dataset_root, subject=subject)
+        except FileNotFoundError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("original_class_indices", None) is not None:
+            original_tuple = tuple(
+                int(x) for x in np.asarray(payload["original_class_indices"]).tolist()
+            )
+            original_to_compact = {class_idx: idx for idx, class_idx in enumerate(original_tuple)}
+            for class_idx in class_indices:
+                compact_idx = original_to_compact.get(int(class_idx))
+                if compact_idx is None:
+                    continue
+                image_idx = int(compact_idx) * images_per_class
+                if 0 <= image_idx < len(train_img_files):
+                    class_names_by_id[int(class_idx)] = _extract_class_name_from_train_file(
+                        train_img_files[image_idx]
+                    )
+
+        for class_idx in class_indices:
+            image_idx = int(class_idx) * images_per_class
+            if 0 <= image_idx < len(train_img_files):
+                class_names_by_id[int(class_idx)] = _extract_class_name_from_train_file(
+                    train_img_files[image_idx]
+                )
+
+    return [class_names_by_id.get(int(class_idx), f"class_{int(class_idx)}") for class_idx in class_indices]
 
 
 def _discover_all_subjects(dataset_root: str) -> tuple[str, ...]:
@@ -196,6 +283,64 @@ def _resolve_subjects(data: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     return subject, subjects
 
 
+def _load_subject_eeg_payload(dataset_root: str, subject: str) -> Any:
+    eeg_path = Path(dataset_root) / "THINGS_EEG_2" / subject / "preprocessed_eeg_training.npy"
+    if not eeg_path.exists():
+        raise FileNotFoundError(f"EEG file not found: {eeg_path}")
+    payload = np.load(eeg_path, allow_pickle=True)
+    if isinstance(payload, np.ndarray) and payload.dtype == object and payload.ndim == 0:
+        payload = payload.item()
+    return payload
+
+
+def _resolve_dataset_class_indices(
+    dataset_root: str,
+    subject: str,
+    class_indices: Sequence[int],
+) -> tuple[tuple[int, ...], bool]:
+    payload = _load_subject_eeg_payload(dataset_root=dataset_root, subject=subject)
+    original_class_indices = None
+    eeg_shape = None
+    if isinstance(payload, dict):
+        original_class_indices = payload.get("original_class_indices", None)
+        if "preprocessed_eeg_data" not in payload:
+            raise KeyError("Expected key 'preprocessed_eeg_data' in EEG dict.")
+        eeg_shape = np.asarray(payload["preprocessed_eeg_data"]).shape
+    else:
+        eeg_shape = np.asarray(payload).shape
+
+    if len(eeg_shape) != 4:
+        raise ValueError(
+            f"Expected EEG shape [images, repeats, channels, time], got {tuple(eeg_shape)}."
+        )
+    num_images = int(eeg_shape[0])
+    images_per_class = 10
+    if num_images % images_per_class != 0:
+        raise ValueError(
+            f"Number of EEG images must be divisible by {images_per_class}, got {num_images}."
+        )
+    num_dataset_classes = num_images // images_per_class
+    class_indices_tuple = tuple(_validate_class_indices(class_indices))
+
+    if original_class_indices is not None:
+        original_tuple = tuple(int(x) for x in np.asarray(original_class_indices).tolist())
+        original_to_compact = {class_idx: idx for idx, class_idx in enumerate(original_tuple)}
+        missing = [class_idx for class_idx in class_indices_tuple if class_idx not in original_to_compact]
+        if missing:
+            raise ValueError(
+                "Requested class_indices are not present in compact EEG dataset: "
+                f"{missing}. Available original_class_indices: {list(original_tuple)}"
+            )
+        return tuple(original_to_compact[class_idx] for class_idx in class_indices_tuple), True
+
+    if num_dataset_classes == len(class_indices_tuple) and (
+        not class_indices_tuple or max(class_indices_tuple) >= num_dataset_classes
+    ):
+        return tuple(range(num_dataset_classes)), True
+
+    return class_indices_tuple, False
+
+
 def load_eeg_classifier_config(
     config_path: str,
     overrides: Optional[dict[str, Any]] = None,
@@ -217,7 +362,10 @@ def load_eeg_classifier_config(
         raise ValueError(
             f"class_subset must be one of {sorted(SUPPORTED_CLASS_SUBSETS)}, got: {class_subset}"
         )
-    class_indices, class_names = _resolve_classifier_class_indices(class_subset)
+    if data.get("class_indices", None) is not None:
+        class_indices = _validate_class_indices(data["class_indices"])
+    else:
+        class_indices = _resolve_classifier_class_indices(class_subset)
 
     eeg_normalization = str(data["eeg_normalization"]).lower()
     if eeg_normalization not in SUPPORTED_EEG_NORMALIZATION:
@@ -255,6 +403,17 @@ def load_eeg_classifier_config(
             raise ValueError("eeg_window_pre_ms and eeg_window_post_ms must be non-negative.")
 
     subject, subjects = _resolve_subjects(data)
+    class_names = _resolve_class_names(
+        dataset_root=str(data["dataset_root"]),
+        subject=subjects[0],
+        class_indices=class_indices,
+        provided_class_names=data.get("class_names", None),
+    )
+    dataset_class_indices, compact_dataset = _resolve_dataset_class_indices(
+        dataset_root=str(data["dataset_root"]),
+        subject=subjects[0],
+        class_indices=class_indices,
+    )
 
     return EEGClassifierConfig(
         dataset_root=str(data["dataset_root"]),
@@ -263,8 +422,10 @@ def load_eeg_classifier_config(
         split_seed=int(data["split_seed"]),
         class_subset=class_subset,
         class_indices=tuple(class_indices),
+        dataset_class_indices=dataset_class_indices,
         class_names=tuple(class_names),
         num_classes=len(class_indices),
+        compact_dataset=compact_dataset,
         batch_size=int(data["batch_size"]),
         num_workers=int(data["num_workers"]),
         lr=float(data["lr"]),
@@ -329,7 +490,7 @@ def _resolve_eeg_window_config(config: EEGClassifierConfig) -> Optional[dict[str
         dataset_root=config.dataset_root,
         subject=config.subjects[0],
         split="train",
-        class_indices=config.class_indices,
+        class_indices=config.dataset_class_indices,
         transform=None,
         split_seed=config.split_seed,
     )
@@ -367,7 +528,7 @@ def _compute_train_eeg_channel_stats(config: EEGClassifierConfig) -> dict[str, A
             dataset_root=config.dataset_root,
             subject=subject,
             split="train",
-            class_indices=config.class_indices,
+            class_indices=config.dataset_class_indices,
             transform=None,
             split_seed=config.split_seed,
         )
@@ -446,13 +607,13 @@ def _make_subject_dataset_with_transform(
     split: str,
     eeg_transform,
 ):
-    target_transform = ClassIndexToContiguousLabel(config.class_indices)
+    target_transform = ClassIndexToContiguousLabel(config.dataset_class_indices)
     if config.sample_mode == "repetitions":
         dataset = EEGLabelDataset(
             dataset_root=config.dataset_root,
             subject=subject,
             split=split,
-            class_indices=config.class_indices,
+            class_indices=config.dataset_class_indices,
             transform=eeg_transform,
             target_transform=target_transform,
             split_seed=config.split_seed,
@@ -462,7 +623,7 @@ def _make_subject_dataset_with_transform(
             dataset_root=config.dataset_root,
             subject=subject,
             split=split,
-            class_indices=config.class_indices,
+            class_indices=config.dataset_class_indices,
             transform=eeg_transform,
             target_transform=target_transform,
             split_seed=config.split_seed,
@@ -881,6 +1042,9 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
     print(f"Subject chunk size: {config.subject_chunk_size}")
     print(f"Class subset: {config.class_subset}")
     print(f"Class indices: {list(config.class_indices)}")
+    print(f"Compact dataset: {config.compact_dataset}")
+    if config.compact_dataset:
+        print(f"Dataset class indices: {list(config.dataset_class_indices)}")
     print(f"Train samples: {train_samples}")
     print(f"Train-eval samples: {train_samples}")
     print(f"Valid samples: {valid_samples}")

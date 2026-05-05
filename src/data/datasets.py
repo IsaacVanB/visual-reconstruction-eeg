@@ -109,7 +109,9 @@ class EEGImageDataset(Dataset):
 
         self.image_root = os.path.join(self.dataset_root, "images_THINGS", "object_images")
         if self.eeg.ndim != 4 or self.eeg.shape[1:] != (4, 17, 100):
-            raise ValueError("Expected EEG shape (16540, 4, 17, 100); " f"got {self.eeg.shape}")
+            raise ValueError(
+                "Expected EEG shape (images, 4, 17, 100); " f"got {self.eeg.shape}"
+            )
         if self.times.shape[0] != self.eeg.shape[-1]:
             raise ValueError(
                 "EEG times length does not match last EEG dimension: "
