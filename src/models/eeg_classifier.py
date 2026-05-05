@@ -12,7 +12,6 @@ def resolve_classifier_architecture_name(architecture: str | None) -> str:
     aliases = {
         "cnn": "cnn",
         "eegclassifier20cnn": "cnn",
-        "notebook_cnn": "cnn",
         "eegnet": "eegnet",
         "eegnetclassifier": "eegnet",
     }
