@@ -1,5 +1,6 @@
 import argparse
 import csv
+from dataclasses import MISSING
 import json
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,7 @@ from src.evaluation.eeg_eval_core import (
     resolve_pca_params_path,
     resolve_torch_device,
 )
-from src.models import EEGClassifier20CNN
+from src.models import build_eeg_classifier_model, resolve_classifier_architecture_name
 from src.training.train_eeg_classifier import (
     EEGClassifierConfig,
     ClassIndexToContiguousLabel,
@@ -174,14 +175,40 @@ def _classifier_config_from_checkpoint(
     saved_cfg = dict(checkpoint.get("config", {}))
     if "subjects" not in saved_cfg:
         saved_cfg["subjects"] = (str(saved_cfg.get("subject", "sub-1")),)
+    saved_cfg.setdefault(
+        "model_architecture",
+        checkpoint.get(
+            "model_architecture",
+            saved_cfg.get(
+                "model_architecture",
+                _infer_classifier_architecture_from_state_dict(checkpoint["model_state_dict"]),
+            ),
+        ),
+    )
+    saved_cfg["model_architecture"] = resolve_classifier_architecture_name(
+        saved_cfg["model_architecture"]
+    )
     saved_cfg.setdefault("dataset_class_indices", saved_cfg.get("class_indices"))
     saved_cfg.setdefault("compact_dataset", False)
     saved_cfg.setdefault("evaluate_train_each_epoch", False)
     saved_cfg.setdefault("evaluate_test_each_epoch", False)
     saved_cfg.setdefault("subject_chunk_size", 1)
+    saved_cfg.setdefault("cnn_hidden_dim", 128)
+    saved_cfg.setdefault("eegnet_f1", 8)
+    saved_cfg.setdefault("eegnet_d", 2)
+    saved_cfg.setdefault("eegnet_f2", None)
+    saved_cfg.setdefault("eegnet_kernel_length", 63)
+    saved_cfg.setdefault("eegnet_separable_kernel_length", 15)
+    saved_cfg.setdefault("eegnet_dropout", 0.25)
     allowed = set(EEGClassifierConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in saved_cfg.items() if key in allowed}
-    missing = allowed.difference(filtered.keys())
+    missing = {
+        key
+        for key, field in EEGClassifierConfig.__dataclass_fields__.items()
+        if key not in filtered
+        and field.default is MISSING
+        and field.default_factory is MISSING
+    }
     if missing:
         raise ValueError(
             "Classifier checkpoint config is missing required fields: "
@@ -201,6 +228,12 @@ def _classifier_config_from_checkpoint(
         class_indices=config.class_indices,
     )
     return config
+
+
+def _infer_classifier_architecture_from_state_dict(model_state_dict: dict[str, torch.Tensor]) -> str:
+    if any(key.startswith("block1.") or key.startswith("block2.") for key in model_state_dict):
+        return "eegnet"
+    return "cnn"
 
 
 def _classifier_zscore_stats(checkpoint: dict[str, Any], config: EEGClassifierConfig) -> dict | None:
@@ -576,7 +609,7 @@ def _create_run_output_dir(base_output_dir: Path) -> Path:
 
 
 def _classify_sample(
-    classifier: EEGClassifier20CNN,
+    classifier: torch.nn.Module,
     classifier_tf,
     raw_dataset: EEGImageAveragedDataset,
     image_index: int,
@@ -712,10 +745,22 @@ def main() -> None:
 
     sample_eeg_np = raw_dataset._average_repeats(int(raw_dataset._avg_sample_index[0]))
     sample_classifier_eeg = classifier_tf(sample_eeg_np)
-    classifier = EEGClassifier20CNN(
+    classifier = build_eeg_classifier_model(
+        architecture=classifier_config.model_architecture,
         eeg_channels=int(sample_classifier_eeg.shape[0]),
         eeg_timesteps=int(sample_classifier_eeg.shape[1]),
         num_classes=int(classifier_config.num_classes),
+        cnn_hidden_dim=int(classifier_config.cnn_hidden_dim),
+        eegnet_f1=int(classifier_config.eegnet_f1),
+        eegnet_d=int(classifier_config.eegnet_d),
+        eegnet_f2=(
+            int(classifier_config.eegnet_f2)
+            if classifier_config.eegnet_f2 is not None
+            else None
+        ),
+        eegnet_kernel_length=int(classifier_config.eegnet_kernel_length),
+        eegnet_separable_kernel_length=int(classifier_config.eegnet_separable_kernel_length),
+        eegnet_dropout=float(classifier_config.eegnet_dropout),
     ).to(device)
     classifier.load_state_dict(classifier_ckpt["model_state_dict"])
     classifier.eval()
