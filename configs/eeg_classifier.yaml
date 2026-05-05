@@ -23,15 +23,20 @@ class_indices: [
     431,   # dog
     977,   # panda
     114,   # bird
-    159,   # bowling_ball
-    28,    # apple
-    374,   # cow
+    # 159,   # bowling_ball
+    # 28,    # apple
+    # 374,   # cow
     596,   # glasses
-    633,   # guitar
-    146,   # book
+    # 633,   # guitar
+    # 146,   # book
     1246,  # shark
     390,   # crown
     1314,  # snowman
+    1220,  # scissors
+    1509,  # traffic_light
+    1511,  # train
+    1487,  # toilet
+    1631,  # wolf
 ]
 # Optional display names matching class_indices. If omitted, names are inferred
 # from image_metadata.npy when possible.
