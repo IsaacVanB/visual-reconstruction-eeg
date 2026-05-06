@@ -240,13 +240,13 @@ def _resolve_class_names(
                     class_names_by_id[int(class_idx)] = _extract_class_name_from_train_file(
                         train_img_files[image_idx]
                     )
-
-        for class_idx in class_indices:
-            image_idx = int(class_idx) * images_per_class
-            if 0 <= image_idx < len(train_img_files):
-                class_names_by_id[int(class_idx)] = _extract_class_name_from_train_file(
-                    train_img_files[image_idx]
-                )
+        else:
+            for class_idx in class_indices:
+                image_idx = int(class_idx) * images_per_class
+                if 0 <= image_idx < len(train_img_files):
+                    class_names_by_id[int(class_idx)] = _extract_class_name_from_train_file(
+                        train_img_files[image_idx]
+                    )
 
     return [class_names_by_id.get(int(class_idx), f"class_{int(class_idx)}") for class_idx in class_indices]
 
