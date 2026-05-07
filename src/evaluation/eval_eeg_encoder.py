@@ -497,6 +497,7 @@ def main():
     originals_for_grid = []
     pca_recons_for_grid = []
     recons_for_grid = []
+    grid_image_indices: set[int] = set()
     gt_pca_recon_cache: dict[int, torch.Tensor] = {}
     missing_gt_latent_count = 0
     with torch.no_grad():
@@ -539,7 +540,11 @@ def main():
                     f"rep_{rep_tag}.png"
                 )
                 _tensor_to_pil(recon_01[j]).save(output_dir / out_name)
-                if len(originals_for_grid) < args.grid_images:
+                image_idx_int = int(image_index)
+                if (
+                    len(originals_for_grid) < args.grid_images
+                    and image_idx_int not in grid_image_indices
+                ):
                     image_name = dataset.train_img_files[int(image_index)]
                     gt = load_ground_truth_tensor(
                         image_root=image_root,
@@ -547,7 +552,6 @@ def main():
                         width=int(recon_w),
                         height=int(recon_h),
                     )
-                    image_idx_int = int(image_index)
                     if image_idx_int in gt_pca_recon_cache:
                         gt_pca_recon = gt_pca_recon_cache[image_idx_int]
                     else:
@@ -579,6 +583,7 @@ def main():
                     originals_for_grid.append(gt)
                     pca_recons_for_grid.append(gt_pca_recon)
                     recons_for_grid.append(recon_01[j].detach().cpu())
+                    grid_image_indices.add(image_idx_int)
                 saved += 1
             if args.max_samples is not None and saved >= args.max_samples:
                 break

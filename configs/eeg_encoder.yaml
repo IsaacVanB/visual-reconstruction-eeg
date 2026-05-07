@@ -4,7 +4,7 @@ image_latent_root: latents/img_pca_4_all
 #subject: sub-1
 # Optional multi-subject training. When set, this takes precedence over subject.
 # Use subjects: all to train on every available sub-* folder.
-subjects: [sub-1, sub-2, sub-3, sub-4, sub-5, sub-6]
+subjects: [sub-1, sub-2, sub-3]
 # subjects: all
 split_seed: 0
 
@@ -26,7 +26,7 @@ cosine_loss_weight: 0.0
 device: auto
 output_dir: outputs/eeg_encoder
 # Freeform note about what changed since the last run; saved as a .txt artifact per run.
-run_change_note: "Added dropout layers" #"Changes MSE weight = 0.7, cosine = 0.3"
+run_change_note: "BTraining on 3 subjects" #"Changes MSE weight = 0.7, cosine = 0.3"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -42,9 +42,9 @@ eeg_window_post_ms: 500
 # - none: use individual trials/repeats as separate training examples
 # - all: average all repeats per stimulus
 # - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
-averaging_mode: random_k
+averaging_mode: none
 # Required when averaging_mode: random_k
-k_repeats: 2
+# k_repeats: 2
 
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]
