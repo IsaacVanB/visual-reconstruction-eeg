@@ -12,15 +12,19 @@ split_seed: 0
 output_dim: 4
 
 # Optimization
-batch_size: 16
+batch_size: 64
 # Number of subjects to keep loaded at once for multi-subject runs.
 subject_chunk_size: 3
 num_workers: 0
 lr: 0.0001
 weight_decay: 0.001
 epochs: 15
-mse_loss_weight: 0.7
-cosine_loss_weight: 0.3
+mse_loss_weight: 1.0
+cosine_loss_weight: 0.0
+# Stop training when validation loss does not improve by at least min_delta
+# for this many consecutive epochs. Set patience to null to disable.
+early_stopping_patience: 5
+early_stopping_min_delta: 0.0
 
 # Runtime/output
 device: auto
@@ -39,9 +43,10 @@ eeg_window_pre_ms: 0
 eeg_window_post_ms: 500
 
 # EEG repeat averaging:
+# - none: use individual trials/repeats as separate training examples
 # - all: average all repeats per stimulus
 # - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
-averaging_mode: all
+averaging_mode: none
 # Required when averaging_mode: random_k
 # k_repeats: 2
 
