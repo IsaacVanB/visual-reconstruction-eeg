@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--latent-root", default=None)
     parser.add_argument("--subject", default=None)
+    parser.add_argument(
+        "--subjects",
+        nargs="+",
+        default=None,
+        help="Evaluate multiple subjects, e.g. --subjects sub-1 sub-2, or --subjects all.",
+    )
     parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--pca-params-path", default=None)
     parser.add_argument("--metadata-path", default="latents/img_full_metadata.json")
@@ -73,7 +79,7 @@ def parse_args() -> argparse.Namespace:
         default="outputs/eeg_sd_grid",
         help="Base output directory. A new run_* subdirectory is created inside it each run.",
     )
-    parser.add_argument("--max-samples", type=int, default=20)
+    parser.add_argument("--max-samples", type=int, default=20, help="Maximum generated samples per subject.")
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--strength", type=float, default=0.8)
     parser.add_argument("--guidance-scale", type=float, default=7.5)
@@ -284,6 +290,14 @@ def _resolve_encoder_inputs(
     split_seed: int | None,
 ) -> tuple[str, str, str, int]:
     resolved_dataset_root = dataset_root or saved_cfg.get("dataset_root", "datasets")
+    if dataset_root is None and not Path(str(resolved_dataset_root)).exists():
+        local_dataset_root = Path("datasets")
+        if local_dataset_root.exists():
+            print(
+                "Checkpoint dataset_root does not exist locally; "
+                f"using {local_dataset_root} instead of {resolved_dataset_root}."
+            )
+            resolved_dataset_root = str(local_dataset_root)
     resolved_output_dim = int(saved_cfg.get("output_dim", 0))
     raw_latent_root = latent_root or saved_cfg.get("latent_root", saved_cfg.get("image_latent_root"))
     if raw_latent_root is None:
@@ -303,6 +317,55 @@ def _resolve_encoder_inputs(
         str(resolved_subject),
         int(resolved_split_seed),
     )
+
+
+def _discover_eval_subjects(dataset_root: str) -> tuple[str, ...]:
+    things_root = Path(dataset_root) / "THINGS_EEG_2"
+    if not things_root.exists():
+        raise FileNotFoundError(f"THINGS EEG root not found: {things_root}")
+
+    subjects = []
+
+    def subject_sort_key(path: Path) -> tuple[int, str]:
+        suffix = path.name.removeprefix("sub-")
+        return (int(suffix), path.name) if suffix.isdigit() else (10**9, path.name)
+
+    for subject_dir in sorted(things_root.glob("sub-*"), key=subject_sort_key):
+        eeg_path = subject_dir / "preprocessed_eeg_training.npy"
+        if subject_dir.is_dir() and eeg_path.exists():
+            subjects.append(subject_dir.name)
+    if not subjects:
+        raise FileNotFoundError(
+            f"No subject EEG files found under {things_root}. "
+            "Expected sub-*/preprocessed_eeg_training.npy."
+        )
+    return tuple(subjects)
+
+
+def _resolve_eval_subjects(
+    subjects_arg: list[str] | None,
+    subject_arg: str | None,
+    default_subject: str,
+    dataset_root: str,
+) -> tuple[str, ...]:
+    if subjects_arg is not None:
+        subjects = tuple(str(subject) for subject in subjects_arg)
+        if len(subjects) == 1 and subjects[0].lower() == "all":
+            return _discover_eval_subjects(dataset_root)
+        if any(subject.lower() == "all" for subject in subjects):
+            raise ValueError("Use --subjects all by itself, not mixed with explicit subjects.")
+    elif subject_arg is not None:
+        if str(subject_arg).lower() == "all":
+            return _discover_eval_subjects(dataset_root)
+        subjects = (str(subject_arg),)
+    else:
+        subjects = (str(default_subject),)
+
+    if not subjects:
+        raise ValueError("At least one subject is required.")
+    if len(set(subjects)) != len(subjects):
+        raise ValueError("--subjects contains duplicates.")
+    return subjects
 
 
 def _tensor_to_pil(image_chw_01: torch.Tensor, size: int | None = None) -> Image.Image:
@@ -677,18 +740,41 @@ def _classify_sample(
     }
 
 
+def _build_filtered_subject_dataset(
+    dataset_root: str,
+    subject: str,
+    class_indices: tuple[int, ...],
+    split_seed: int,
+    image_root: Path,
+) -> EEGImageAveragedDataset:
+    dataset = EEGImageAveragedDataset(
+        dataset_root=dataset_root,
+        subject=subject,
+        split="test",
+        class_indices=class_indices,
+        transform=None,
+        split_seed=split_seed,
+        averaging_mode="all",
+    )
+    filtered_indices, missing = filter_image_indices_to_existing_files(
+        image_indices=dataset._avg_sample_index,
+        train_img_files=dataset.train_img_files,
+        image_root=image_root,
+    )
+    dataset._avg_sample_index = filtered_indices
+    if missing:
+        print(
+            f"Warning: skipped {len(missing)} missing ground-truth test images "
+            f"for subject {subject}."
+        )
+    return dataset
+
+
 def main() -> None:
     args = parse_args()
     device = resolve_torch_device(args.device)
     output_base_dir = Path(args.output_dir)
     output_dir = _create_run_output_dir(output_base_dir)
-    intermediates_dir = output_dir / "intermediates"
-    sd_label_dir = output_dir / "sd_label_only"
-    sd_img2img_dir = output_dir / "sd_label_image"
-    sd_label_dir.mkdir(parents=True, exist_ok=True)
-    sd_img2img_dir.mkdir(parents=True, exist_ok=True)
-    if args.save_intermediates:
-        intermediates_dir.mkdir(parents=True, exist_ok=True)
 
     classifier_checkpoint_path = _resolve_best_checkpoint(
         args.classifier_checkpoint,
@@ -701,11 +787,25 @@ def main() -> None:
     classifier_ckpt = _load_pt(classifier_checkpoint_path)
     encoder_ckpt, encoder_cfg = load_checkpoint(encoder_checkpoint_path)
 
+    dataset_root, latent_root, subject, split_seed = _resolve_encoder_inputs(
+        saved_cfg=encoder_cfg,
+        ckpt=encoder_ckpt,
+        dataset_root=args.dataset_root,
+        latent_root=args.latent_root,
+        subject=(args.subject if args.subjects is None else None),
+        split_seed=args.split_seed,
+    )
+    eval_subjects = _resolve_eval_subjects(
+        subjects_arg=args.subjects,
+        subject_arg=args.subject,
+        default_subject=subject,
+        dataset_root=dataset_root,
+    )
     classifier_config = _classifier_config_from_checkpoint(
         checkpoint=classifier_ckpt,
-        dataset_root=args.dataset_root,
-        subject=args.subject,
-        split_seed=args.split_seed,
+        dataset_root=dataset_root,
+        subject=eval_subjects[0],
+        split_seed=split_seed,
     )
     classifier_stats = _classifier_zscore_stats(classifier_ckpt, classifier_config)
     classifier_tf = _classifier_transform(classifier_config, classifier_stats)
@@ -713,37 +813,19 @@ def main() -> None:
     classifier_class_names = tuple(str(x) for x in classifier_config.class_names)
     classifier_target_tf = ClassIndexToContiguousLabel(classifier_class_indices)
 
-    dataset_root, latent_root, subject, split_seed = _resolve_encoder_inputs(
-        saved_cfg=encoder_cfg,
-        ckpt=encoder_ckpt,
-        dataset_root=args.dataset_root,
-        latent_root=args.latent_root,
-        subject=args.subject,
-        split_seed=args.split_seed,
-    )
     encoder_tf = build_eeg_transform_from_saved_cfg(encoder_cfg)
-    raw_dataset = EEGImageAveragedDataset(
-        dataset_root=dataset_root,
-        subject=subject,
-        split="test",
-        class_indices=classifier_class_indices,
-        transform=None,
-        split_seed=split_seed,
-        averaging_mode="all",
-    )
     image_root = Path(dataset_root) / "images_THINGS" / "object_images"
-    filtered_indices, missing = filter_image_indices_to_existing_files(
-        image_indices=raw_dataset._avg_sample_index,
-        train_img_files=raw_dataset.train_img_files,
+    sample_dataset = _build_filtered_subject_dataset(
+        dataset_root=dataset_root,
+        subject=eval_subjects[0],
+        class_indices=classifier_class_indices,
+        split_seed=split_seed,
         image_root=image_root,
     )
-    raw_dataset._avg_sample_index = filtered_indices
-    if missing:
-        print(f"Warning: skipped {len(missing)} missing ground-truth test images.")
-    if len(raw_dataset) == 0:
-        raise RuntimeError("No classifier test samples remain after filtering.")
+    if len(sample_dataset) == 0:
+        raise RuntimeError(f"No classifier test samples remain for subject {eval_subjects[0]}.")
 
-    sample_eeg_np = raw_dataset._average_repeats(int(raw_dataset._avg_sample_index[0]))
+    sample_eeg_np = sample_dataset._average_repeats(int(sample_dataset._avg_sample_index[0]))
     sample_classifier_eeg = classifier_tf(sample_eeg_np)
     classifier = build_eeg_classifier_model(
         architecture=classifier_config.model_architecture,
@@ -802,168 +884,198 @@ def main() -> None:
     ssim_fn = _load_ssim_fn()
     lpips_metric = _load_lpips_metric(net=args.lpips_net, device=device)
 
-    target_count = min(int(args.max_samples), len(raw_dataset))
-    if target_count <= 0:
+    if int(args.max_samples) <= 0:
         raise ValueError("--max-samples must be greater than 0.")
-    ground_truth_images: list[Image.Image] = []
-    label_only_images: list[Image.Image] = []
-    label_image_images: list[Image.Image] = []
-    ground_truth_captions: list[str | None] = []
-    label_only_captions: list[str | None] = []
-    label_image_captions: list[str | None] = []
-    column_labels: list[str] = []
-    manifest_rows: list[dict[str, Any]] = []
 
     print(f"Classifier checkpoint: {classifier_checkpoint_path}")
     print(f"Encoder checkpoint: {encoder_checkpoint_path}")
     print(f"Output directory: {output_dir}")
     print(f"Device: {device}")
-    if args.correct_only:
-        print(f"Generating up to {target_count} classifier-correct test samples.")
-    else:
-        print(f"Generating {target_count} classifier test samples.")
+    print(f"Subjects: {list(eval_subjects)}")
+    print(f"Max samples per subject: {int(args.max_samples)}")
     print(f"Classifier trial mode: {args.classifier_trial_mode}")
 
-    with torch.no_grad():
-        considered = 0
-        for image_index in raw_dataset._avg_sample_index:
-            if len(manifest_rows) >= target_count:
-                break
-            considered += 1
-            image_index = int(image_index)
-            true_class_id = image_index // int(raw_dataset.images_per_class)
-            true_contiguous = classifier_target_tf(true_class_id)
-            true_label = classifier_class_names[int(true_contiguous)]
-            image_name = str(raw_dataset.train_img_files[image_index])
-            image_path = resolve_image_path(image_root=image_root, image_name=image_name)
+    all_manifest_rows: list[dict[str, Any]] = []
+    subject_summaries: list[dict[str, Any]] = []
 
-            classifier_result = _classify_sample(
-                classifier=classifier,
-                classifier_tf=classifier_tf,
-                raw_dataset=raw_dataset,
-                image_index=image_index,
-                true_contiguous=int(true_contiguous),
-                mode=args.classifier_trial_mode,
-                device=device,
-            )
-            pred_contiguous = int(classifier_result["pred_contiguous"])
-            pred_prob = float(classifier_result["pred_prob"])
-            pred_label = classifier_class_names[pred_contiguous]
-            pred_class_id = int(classifier_class_indices[pred_contiguous])
-            classifier_correct = bool(classifier_result["classifier_correct"])
-            if args.correct_only and not classifier_correct:
-                print(
-                    f"[skip {considered}/{len(raw_dataset)}] img={image_index} "
-                    f"true={true_label} pred={pred_label} prob={pred_prob:.3f}"
+    for subject_idx, eval_subject in enumerate(eval_subjects):
+        subject_output_dir = output_dir / eval_subject
+        intermediates_dir = subject_output_dir / "intermediates"
+        sd_label_dir = subject_output_dir / "sd_label_only"
+        sd_img2img_dir = subject_output_dir / "sd_label_image"
+        sd_label_dir.mkdir(parents=True, exist_ok=True)
+        sd_img2img_dir.mkdir(parents=True, exist_ok=True)
+        if args.save_intermediates:
+            intermediates_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_dataset = _build_filtered_subject_dataset(
+            dataset_root=dataset_root,
+            subject=eval_subject,
+            class_indices=classifier_class_indices,
+            split_seed=split_seed,
+            image_root=image_root,
+        )
+        if len(raw_dataset) == 0:
+            print(f"Warning: no classifier test samples remain for subject {eval_subject}; skipping.")
+            continue
+
+        target_count = min(int(args.max_samples), len(raw_dataset))
+        ground_truth_images: list[Image.Image] = []
+        label_only_images: list[Image.Image] = []
+        label_image_images: list[Image.Image] = []
+        ground_truth_captions: list[str | None] = []
+        label_only_captions: list[str | None] = []
+        label_image_captions: list[str | None] = []
+        column_labels: list[str] = []
+        manifest_rows: list[dict[str, Any]] = []
+
+        if args.correct_only:
+            print(f"[{eval_subject}] Generating up to {target_count} classifier-correct test samples.")
+        else:
+            print(f"[{eval_subject}] Generating {target_count} classifier test samples.")
+
+        with torch.no_grad():
+            considered = 0
+            for image_index in raw_dataset._avg_sample_index:
+                if len(manifest_rows) >= target_count:
+                    break
+                considered += 1
+                image_index = int(image_index)
+                true_class_id = image_index // int(raw_dataset.images_per_class)
+                true_contiguous = classifier_target_tf(true_class_id)
+                true_label = classifier_class_names[int(true_contiguous)]
+                image_name = str(raw_dataset.train_img_files[image_index])
+                image_path = resolve_image_path(image_root=image_root, image_name=image_name)
+
+                classifier_result = _classify_sample(
+                    classifier=classifier,
+                    classifier_tf=classifier_tf,
+                    raw_dataset=raw_dataset,
+                    image_index=image_index,
+                    true_contiguous=int(true_contiguous),
+                    mode=args.classifier_trial_mode,
+                    device=device,
                 )
-                continue
+                pred_contiguous = int(classifier_result["pred_contiguous"])
+                pred_prob = float(classifier_result["pred_prob"])
+                pred_label = classifier_class_names[pred_contiguous]
+                pred_class_id = int(classifier_class_indices[pred_contiguous])
+                classifier_correct = bool(classifier_result["classifier_correct"])
+                if args.correct_only and not classifier_correct:
+                    print(
+                        f"[{eval_subject} skip {considered}/{len(raw_dataset)}] img={image_index} "
+                        f"true={true_label} pred={pred_label} prob={pred_prob:.3f}"
+                    )
+                    continue
 
-            sample_pos = len(manifest_rows)
-            prompt = args.prompt_template.format(label=pred_label.replace("_", " "))
+                sample_pos = len(manifest_rows)
+                global_sample_pos = len(all_manifest_rows)
+                prompt = args.prompt_template.format(label=pred_label.replace("_", " "))
 
-            eeg_np = raw_dataset._average_repeats(image_index)
-            encoder_eeg = encoder_tf(eeg_np).unsqueeze(0).to(device=device, dtype=torch.float32)
-            pred_pca = encoder(encoder_eeg)
-            vae_recon = decode_from_pca_prediction(
-                pred_pca=pred_pca,
-                pca=pca,
-                latent_shape=(c, h, w),
-                vae=vae,
-                scaling_factor=scaling_factor,
-                decode_scaling_mode=decode_scaling_mode,
-            )[0]
-            init_image = _tensor_to_pil(vae_recon, size=args.image_size)
-            gt_image = _load_ground_truth(image_path, size=args.image_size)
+                eeg_np = raw_dataset._average_repeats(image_index)
+                encoder_eeg = encoder_tf(eeg_np).unsqueeze(0).to(device=device, dtype=torch.float32)
+                pred_pca = encoder(encoder_eeg)
+                vae_recon = decode_from_pca_prediction(
+                    pred_pca=pred_pca,
+                    pca=pca,
+                    latent_shape=(c, h, w),
+                    vae=vae,
+                    scaling_factor=scaling_factor,
+                    decode_scaling_mode=decode_scaling_mode,
+                )[0]
+                init_image = _tensor_to_pil(vae_recon, size=args.image_size)
+                gt_image = _load_ground_truth(image_path, size=args.image_size)
 
-            seed = int(args.seed) + sample_pos
-            generator = torch.Generator(device=device).manual_seed(seed)
-            label_image = text_pipe(
-                prompt=prompt,
-                negative_prompt=args.negative_prompt if args.negative_prompt else None,
-                height=args.image_size,
-                width=args.image_size,
-                guidance_scale=args.guidance_scale,
-                num_inference_steps=args.num_inference_steps,
-                generator=generator,
-            ).images[0]
+                seed = int(args.seed) + subject_idx * 100_000 + sample_pos
+                generator = torch.Generator(device=device).manual_seed(seed)
+                label_image = text_pipe(
+                    prompt=prompt,
+                    negative_prompt=args.negative_prompt if args.negative_prompt else None,
+                    height=args.image_size,
+                    width=args.image_size,
+                    guidance_scale=args.guidance_scale,
+                    num_inference_steps=args.num_inference_steps,
+                    generator=generator,
+                ).images[0]
 
-            generator = torch.Generator(device=device).manual_seed(seed)
-            label_img2img = img2img_pipe(
-                prompt=prompt,
-                negative_prompt=args.negative_prompt if args.negative_prompt else None,
-                image=init_image,
-                strength=args.strength,
-                guidance_scale=args.guidance_scale,
-                num_inference_steps=args.num_inference_steps,
-                generator=generator,
-            ).images[0]
+                generator = torch.Generator(device=device).manual_seed(seed)
+                label_img2img = img2img_pipe(
+                    prompt=prompt,
+                    negative_prompt=args.negative_prompt if args.negative_prompt else None,
+                    image=init_image,
+                    strength=args.strength,
+                    guidance_scale=args.guidance_scale,
+                    num_inference_steps=args.num_inference_steps,
+                    generator=generator,
+                ).images[0]
 
-            gt_tensor = _pil_to_tensor_01(gt_image, device=device)
-            label_tensor = _pil_to_tensor_01(label_image, device=device)
-            label_img2img_tensor = _pil_to_tensor_01(label_img2img, device=device)
-            ssim_label_only = float(
-                ssim_fn(label_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
-            )
-            ssim_label_image = float(
-                ssim_fn(label_img2img_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
-            )
-            gt_tensor_lpips = gt_tensor * 2.0 - 1.0
-            lpips_label_only = float(
-                lpips_metric(label_tensor * 2.0 - 1.0, gt_tensor_lpips)
-                .view(-1)
-                .detach()
-                .cpu()
-                .item()
-            )
-            lpips_label_image = float(
-                lpips_metric(label_img2img_tensor * 2.0 - 1.0, gt_tensor_lpips)
-                .view(-1)
-                .detach()
-                .cpu()
-                .item()
-            )
-            label_only_better_ssim = ssim_label_only >= ssim_label_image
-            label_image_better_ssim = ssim_label_image >= ssim_label_only
-            label_only_better_lpips = lpips_label_only <= lpips_label_image
-            label_image_better_lpips = lpips_label_image <= lpips_label_only
-
-            base_name = f"{sample_pos:02d}_img_{image_index:06d}_{pred_label}"
-            label_only_path = sd_label_dir / f"{base_name}.png"
-            label_image_path = sd_img2img_dir / f"{base_name}.png"
-            label_image.save(label_only_path)
-            label_img2img.save(label_image_path)
-            init_path = None
-            if args.save_intermediates:
-                init_path = intermediates_dir / f"{base_name}_vae_recon.png"
-                init_image.save(init_path)
-
-            if pred_label == true_label:
-                column_labels.append(true_label)
-            else:
-                column_labels.append(f"{true_label} -> {pred_label}")
-            ground_truth_images.append(gt_image)
-            label_only_images.append(label_image)
-            label_image_images.append(label_img2img)
-            ground_truth_captions.append(None)
-            label_only_captions.append(
-                _metric_caption(
-                    ssim_value=ssim_label_only,
-                    lpips_value=lpips_label_only,
-                    bold_ssim=label_only_better_ssim,
-                    bold_lpips=label_only_better_lpips,
+                gt_tensor = _pil_to_tensor_01(gt_image, device=device)
+                label_tensor = _pil_to_tensor_01(label_image, device=device)
+                label_img2img_tensor = _pil_to_tensor_01(label_img2img, device=device)
+                ssim_label_only = float(
+                    ssim_fn(label_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
                 )
-            )
-            label_image_captions.append(
-                _metric_caption(
-                    ssim_value=ssim_label_image,
-                    lpips_value=lpips_label_image,
-                    bold_ssim=label_image_better_ssim,
-                    bold_lpips=label_image_better_lpips,
+                ssim_label_image = float(
+                    ssim_fn(label_img2img_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
                 )
-            )
-            manifest_rows.append(
-                {
+                gt_tensor_lpips = gt_tensor * 2.0 - 1.0
+                lpips_label_only = float(
+                    lpips_metric(label_tensor * 2.0 - 1.0, gt_tensor_lpips)
+                    .view(-1)
+                    .detach()
+                    .cpu()
+                    .item()
+                )
+                lpips_label_image = float(
+                    lpips_metric(label_img2img_tensor * 2.0 - 1.0, gt_tensor_lpips)
+                    .view(-1)
+                    .detach()
+                    .cpu()
+                    .item()
+                )
+                label_only_better_ssim = ssim_label_only >= ssim_label_image
+                label_image_better_ssim = ssim_label_image >= ssim_label_only
+                label_only_better_lpips = lpips_label_only <= lpips_label_image
+                label_image_better_lpips = lpips_label_image <= lpips_label_only
+
+                base_name = f"{sample_pos:02d}_img_{image_index:06d}_{pred_label}"
+                label_only_path = sd_label_dir / f"{base_name}.png"
+                label_image_path = sd_img2img_dir / f"{base_name}.png"
+                label_image.save(label_only_path)
+                label_img2img.save(label_image_path)
+                init_path = None
+                if args.save_intermediates:
+                    init_path = intermediates_dir / f"{base_name}_vae_recon.png"
+                    init_image.save(init_path)
+
+                if pred_label == true_label:
+                    column_labels.append(true_label)
+                else:
+                    column_labels.append(f"{true_label} -> {pred_label}")
+                ground_truth_images.append(gt_image)
+                label_only_images.append(label_image)
+                label_image_images.append(label_img2img)
+                ground_truth_captions.append(None)
+                label_only_captions.append(
+                    _metric_caption(
+                        ssim_value=ssim_label_only,
+                        lpips_value=lpips_label_only,
+                        bold_ssim=label_only_better_ssim,
+                        bold_lpips=label_only_better_lpips,
+                    )
+                )
+                label_image_captions.append(
+                    _metric_caption(
+                        ssim_value=ssim_label_image,
+                        lpips_value=lpips_label_image,
+                        bold_ssim=label_image_better_ssim,
+                        bold_lpips=label_image_better_lpips,
+                    )
+                )
+                row = {
+                    "subject": eval_subject,
                     "sample_pos": sample_pos,
+                    "global_sample_pos": global_sample_pos,
                     "image_index": image_index,
                     "image_name": image_name,
                     "true_class_id": true_class_id,
@@ -986,47 +1098,81 @@ def main() -> None:
                     "label_image_path": str(label_image_path),
                     "vae_recon_path": str(init_path) if init_path is not None else "",
                 }
-            )
-            print(
-                f"[{sample_pos + 1}/{target_count}] img={image_index} "
-                f"true={true_label} pred={pred_label} prob={pred_prob:.3f}"
-            )
+                manifest_rows.append(row)
+                all_manifest_rows.append(row)
+                print(
+                    f"[{eval_subject} {sample_pos + 1}/{target_count}] img={image_index} "
+                    f"true={true_label} pred={pred_label} prob={pred_prob:.3f}"
+                )
+
         if not manifest_rows:
-            raise RuntimeError("No samples matched the requested filter.")
+            print(f"Warning: no samples matched the requested filter for subject {eval_subject}.")
+            subject_summaries.append(
+                {"subject": eval_subject, "output_dir": str(subject_output_dir), "num_samples": 0}
+            )
+            continue
         if args.correct_only and len(manifest_rows) < target_count:
             print(
-                "Warning: fewer classifier-correct samples were available than requested: "
-                f"{len(manifest_rows)} of {target_count}."
+                f"Warning: fewer classifier-correct samples were available for {eval_subject} "
+                f"than requested: {len(manifest_rows)} of {target_count}."
             )
 
+        grid = _build_grid(
+            [
+                ("Ground truth", ground_truth_images),
+                ("Label only", label_only_images),
+                ("Label + EEG image", label_image_images),
+            ],
+            column_labels=column_labels,
+            cell_captions=[
+                ground_truth_captions,
+                label_only_captions,
+                label_image_captions,
+            ],
+        )
+        grid_path = subject_output_dir / "eeg_sd_grid.png"
+        grid.save(grid_path)
+
+        csv_path = subject_output_dir / "manifest.csv"
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(manifest_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(manifest_rows)
+
+        subject_metadata_path = subject_output_dir / "run_metadata.json"
+        subject_metadata = {
+            "subject": eval_subject,
+            "output_dir": str(subject_output_dir),
+            "num_samples": len(manifest_rows),
+            "samples": manifest_rows,
+        }
+        subject_metadata_path.write_text(json.dumps(subject_metadata, indent=2))
+        subject_summaries.append(
+            {
+                "subject": eval_subject,
+                "output_dir": str(subject_output_dir),
+                "grid_path": str(grid_path),
+                "manifest_path": str(csv_path),
+                "metadata_path": str(subject_metadata_path),
+                "num_samples": len(manifest_rows),
+            }
+        )
+
+    if not all_manifest_rows:
+        raise RuntimeError("No samples matched the requested filter for any evaluated subject.")
+
     ssim_permutation_results = paired_permutation_test_greater(
-        ssim_features=[row["ssim_label_image"] for row in manifest_rows],
-        ssim_label_only=[row["ssim_label_only"] for row in manifest_rows],
+        ssim_features=[row["ssim_label_image"] for row in all_manifest_rows],
+        ssim_label_only=[row["ssim_label_only"] for row in all_manifest_rows],
         n_permutations=args.ssim_permutation_test_permutations,
         seed=args.ssim_permutation_test_seed,
     )
 
-    grid = _build_grid(
-        [
-            ("Ground truth", ground_truth_images),
-            ("Label only", label_only_images),
-            ("Label + EEG image", label_image_images),
-        ],
-        column_labels=column_labels,
-        cell_captions=[
-            ground_truth_captions,
-            label_only_captions,
-            label_image_captions,
-        ],
-    )
-    grid_path = output_dir / "eeg_sd_grid.png"
-    grid.save(grid_path)
-
-    csv_path = output_dir / "manifest.csv"
-    with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(manifest_rows[0].keys()))
+    aggregate_csv_path = output_dir / "manifest_all_subjects.csv"
+    with open(aggregate_csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(all_manifest_rows[0].keys()))
         writer.writeheader()
-        writer.writerows(manifest_rows)
+        writer.writerows(all_manifest_rows)
 
     ssim_permutation_path = output_dir / "ssim_paired_permutation_test.json"
     ssim_permutation_path.write_text(json.dumps(ssim_permutation_results, indent=2))
@@ -1040,7 +1186,8 @@ def main() -> None:
                 "output_base_dir": str(output_base_dir),
                 "output_dir": str(output_dir),
                 "dataset_root": dataset_root,
-                "subject": subject,
+                "subjects": list(eval_subjects),
+                "subject_summaries": subject_summaries,
                 "split": "test",
                 "split_seed": split_seed,
                 "class_indices": list(classifier_class_indices),
@@ -1059,13 +1206,12 @@ def main() -> None:
                 "ssim_permutation_test": ssim_permutation_results,
                 "correct_only": bool(args.correct_only),
                 "classifier_trial_mode": args.classifier_trial_mode,
-                "samples": manifest_rows,
+                "samples": all_manifest_rows,
             },
             indent=2,
         )
     )
-    print(f"Saved grid: {grid_path}")
-    print(f"Saved manifest: {csv_path}")
+    print(f"Saved aggregate manifest: {aggregate_csv_path}")
     print(f"Saved SSIM paired permutation test: {ssim_permutation_path}")
     print(
         "SSIM label+image vs label-only paired permutation test: "
