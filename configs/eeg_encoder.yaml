@@ -26,7 +26,7 @@ cosine_loss_weight: 0.0
 device: auto
 output_dir: outputs/eeg_encoder
 # Freeform note about what changed since the last run; saved as a .txt artifact per run.
-run_change_note: "Averaging mode: random 2 repeats" #"Changes MSE weight = 0.7, cosine = 0.3"
+run_change_note: "Added dropout layers" #"Changes MSE weight = 0.7, cosine = 0.3"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -39,6 +39,7 @@ eeg_window_pre_ms: 0
 eeg_window_post_ms: 500
 
 # EEG repeat averaging:
+# - none: use individual trials/repeats as separate training examples
 # - all: average all repeats per stimulus
 # - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
 averaging_mode: random_k

@@ -45,6 +45,7 @@ class EEGEncoderCNN(nn.Module):
             ),
             nn.GroupNorm(num_groups=8, num_channels=32),
             nn.GELU(),
+            nn.Dropout2d(p=0.1),
             nn.Conv2d(
                 in_channels=32,
                 out_channels=64,
@@ -54,6 +55,7 @@ class EEGEncoderCNN(nn.Module):
             ),
             nn.GroupNorm(num_groups=8, num_channels=64),
             nn.GELU(),
+            nn.Dropout2d(p=0.1),
             nn.Conv2d(
                 in_channels=64,
                 out_channels=64,
@@ -70,6 +72,7 @@ class EEGEncoderCNN(nn.Module):
             ),
             nn.GroupNorm(num_groups=8, num_channels=128),
             nn.GELU(),
+            nn.Dropout2d(p=0.1),
             nn.Conv2d(
                 in_channels=128,
                 out_channels=128,
@@ -87,13 +90,14 @@ class EEGEncoderCNN(nn.Module):
             ),
             nn.GroupNorm(num_groups=8, num_channels=128),
             nn.GELU(),
+            nn.Dropout2d(p=0.1),
         )
         self.feature_dim = 128
         self.attn_pool = AttentionPool1d(self.feature_dim)
         self.head = nn.Sequential(
             nn.Linear(self.feature_dim, 512),
             nn.GELU(),
-            nn.Dropout(p=0.1),
+            nn.Dropout(p=0.2),
             nn.Linear(512, output_dim),
         )
 
@@ -164,5 +168,6 @@ def extract_eeg_encoder_cnn_arch_metadata(_model: EEGEncoderCNN) -> dict[str, An
         "pool": "attention_pool_time",
         "feature_dim": int(_model.feature_dim),
         "head_hidden_dim": 512,
-        "head_dropout": 0.1,
+        "feature_dropout2d": 0.1,
+        "head_dropout": 0.2,
     }

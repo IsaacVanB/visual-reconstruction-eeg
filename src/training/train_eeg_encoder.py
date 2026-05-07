@@ -21,7 +21,7 @@ DEFAULT_CLASS_INDICES = list(range(0, 200, 2))
 DEFAULT_CLASS_INDICES_1000 = list(range(0, 2000, 2))
 SUPPORTED_CLASS_SUBSETS = {"default100", "default1000", "all"}
 SUPPORTED_EEG_NORMALIZATION = {"l2", "zscore", "none"}
-SUPPORTED_AVERAGING_MODES = {"all", "random_k"}
+SUPPORTED_AVERAGING_MODES = {"all", "random_k", "none"}
 REQUIRED_CONFIG_KEYS = (
     "dataset_root",
     "split_seed",
@@ -147,7 +147,7 @@ class EEGEncoderConfig:
     eeg_window_actual_start_s: Optional[float]
     eeg_window_actual_end_s: Optional[float]
     eeg_window_num_timepoints: Optional[int]
-    averaging_mode: str  # one of: all, random_k
+    averaging_mode: str  # one of: all, random_k, none
     k_repeats: Optional[int]
     pin_memory: bool
 
@@ -475,18 +475,29 @@ def _make_subject_dataset_with_transform(
     subject: str,
     split: str,
     eeg_transform,
-) -> EEGImageLatentAveragedDataset:
-    dataset = EEGImageLatentAveragedDataset(
-        dataset_root=config.dataset_root,
-        latent_root=config.latent_root,
-        subject=subject,
-        split=split,
-        class_indices=config.class_indices,
-        transform=eeg_transform,
-        split_seed=config.split_seed,
-        averaging_mode=config.averaging_mode,
-        k_repeats=config.k_repeats,
-    )
+) -> EEGImageLatentDataset:
+    if config.averaging_mode == "none":
+        dataset = EEGImageLatentDataset(
+            dataset_root=config.dataset_root,
+            latent_root=config.latent_root,
+            subject=subject,
+            split=split,
+            class_indices=config.class_indices,
+            transform=eeg_transform,
+            split_seed=config.split_seed,
+        )
+    else:
+        dataset = EEGImageLatentAveragedDataset(
+            dataset_root=config.dataset_root,
+            latent_root=config.latent_root,
+            subject=subject,
+            split=split,
+            class_indices=config.class_indices,
+            transform=eeg_transform,
+            split_seed=config.split_seed,
+            averaging_mode=config.averaging_mode,
+            k_repeats=config.k_repeats,
+        )
     if len(dataset) == 0:
         raise ValueError(
             f"No samples found for split={split!r}, subject={subject!r}, "
