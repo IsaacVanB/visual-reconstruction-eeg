@@ -665,10 +665,13 @@ def _run_epoch(
                     f"Prediction shape {tuple(pred.shape)} does not match "
                     f"target shape {tuple(target.shape)}"
                 )
+            '''
             # Combined objective with configurable per-term weights.
-            mse_loss = F.mse_loss(pred, target, reduction="mean")
+            smooth_l1_loss = F.smooth_l1_loss(pred, target, reduction="mean")
             cosine_loss = (1.0 - F.cosine_similarity(pred, target, dim=1)).mean()
-            loss = (mse_loss_weight * mse_loss) + (cosine_loss_weight * cosine_loss)
+            loss = (mse_loss_weight * smooth_l1_loss) + (cosine_loss_weight * cosine_loss)
+            '''
+            loss = F.smooth_l1_loss(pred, target, reduction="mean")
             if is_train:
                 loss.backward()
                 optimizer.step()

@@ -1,0 +1,135 @@
+Target: Downsampled VAE latent grid
+
+Instead of predicting full:
+
+(4, 64, 64) = 16,384 values
+
+predict:
+
+(4, 8, 8) = 256 values
+
+or:
+
+(4, 16, 16) = 1,024 values
+
+Then upsample back to (4, 64, 64) before VAE decoding.
+
+A good first version:
+
+EEG encoder output: (B, 256)
+
+Latent decoder:
+  Linear(256 → 256)
+  GELU
+  Linear(256 → 4 × 8 × 8)
+
+Output:
+  (B, 4, 8, 8)
+
+Train against VAE latents that were downsampled with area or bilinear interpolation:
+
+target_low = F.interpolate(target_latent, size=(8, 8), mode="area")
+
+At evaluation:
+
+pred_full = F.interpolate(pred_low, size=(64, 64), mode="bilinear", align_corners=False)
+decoded = vae.decode(pred_full / scaling_factor).sample
+
+This will be blurry, but that is acceptable. You are trying to recover low-level layout, color, pose, and broad shape, not exact latent texture.
+
+I would start with:
+
+(4, 8, 8)
+
+Recommended PyTorch architecture
+
+Something like this would be a good first implementation.
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class EEGToLowresVAELatent(nn.Module):
+    def __init__(
+        self,
+        n_channels=17,
+        n_times=100,
+        latent_channels=4,
+        latent_size=8,
+        bottleneck_dim=256,
+        dropout=0.25,
+    ):
+        super().__init__()
+
+        self.latent_channels = latent_channels
+        self.latent_size = latent_size
+
+        self.temporal = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(1, 15), padding=(0, 7), bias=False),
+            nn.GroupNorm(8, 32),
+            nn.GELU(),
+
+            nn.Conv2d(32, 64, kernel_size=(1, 9), padding=(0, 4), bias=False),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+        )
+        self.spatial = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=(n_channels, 1), bias=False),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+        )
+
+        self.downsample = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=(1, 7), stride=(1, 2), padding=(0, 3), bias=False),
+            nn.GroupNorm(8, 128),
+            nn.GELU(),
+
+            nn.Conv2d(128, 128, kernel_size=(1, 5), stride=(1, 2), padding=(0, 2), bias=False),
+            nn.GroupNorm(8, 128),
+            nn.GELU(),
+        )
+
+        # Infer flattened size safely
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, n_channels, n_times)
+            h = self.downsample(self.spatial(self.temporal(dummy)))
+            flat_dim = h.numel()
+
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flat_dim, 512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, bottleneck_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(bottleneck_dim, latent_channels * latent_size * latent_size),
+        )
+
+    def forward(self, eeg):
+        """
+        eeg: (B, 17, 100)
+        returns: (B, 4, latent_size, latent_size)
+        """
+        x = eeg.unsqueeze(1)  # (B, 1, C, T)
+        x = self.temporal(x)
+        x = self.spatial(x)
+        x = self.downsample(x)
+        x = self.head(x)
+        x = x.view(eeg.size(0), self.latent_channels, self.latent_size, self.latent_size)
+        return x
+
+Use it with:
+
+model = EEGToLowresVAELatent(
+    n_channels=17,
+    n_times=100,
+    latent_channels=4,
+    latent_size=8,
+    bottleneck_dim=256,
+    dropout=0.25,
+)
+
+Then later:
+
+model = EEGToLowresVAELatent(latent_size=16, bottleneck_dim=512)
