@@ -1091,6 +1091,14 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
         lr=config.lr,
         weight_decay=config.weight_decay,
     )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=3,
+        threshold=1e-3,
+        min_lr=1e-6,
+    )
     resolved_model_architecture = resolve_classifier_architecture_name(config.model_architecture)
     resolved_eegnet_f2 = (
         int(config.eegnet_f2)
@@ -1212,6 +1220,7 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
             history["train_eval_accuracy"].append(train_eval_metrics["accuracy"])
         history["valid_loss"].append(valid_metrics["loss"])
         history["valid_accuracy"].append(valid_metrics["accuracy"])
+        scheduler.step(valid_metrics["loss"])
         if test_metrics is not None:
             history["test_loss"].append(test_metrics["loss"])
             history["test_accuracy"].append(test_metrics["accuracy"])
@@ -1228,7 +1237,8 @@ def train_eeg_classifier(config: EEGClassifierConfig) -> Path:
             f"train_loss={train_metrics['loss']:.6f} "
             f"train_acc={train_metrics['accuracy']:.4f} "
             f"valid_loss={valid_metrics['loss']:.6f} "
-            f"valid_acc={valid_metrics['accuracy']:.4f}"
+            f"valid_acc={valid_metrics['accuracy']:.4f} "
+            f"lr={optimizer.param_groups[0]['lr']:.2e}"
         )
         if train_eval_metrics is not None:
             epoch_msg += f" train_eval_acc={train_eval_metrics['accuracy']:.4f}"
