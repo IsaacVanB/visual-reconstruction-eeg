@@ -128,6 +128,8 @@ class EEGEncoderConfig:
     epochs: int
     mse_loss_weight: float
     cosine_loss_weight: float
+    early_stopping_patience: Optional[int]
+    early_stopping_min_delta: float
 
     # Runtime/output:
     device: str
@@ -313,6 +315,17 @@ def load_eeg_encoder_config(
         raise ValueError("k_repeats must be set when averaging_mode='random_k'.")
     if k_repeats is not None and k_repeats < 1:
         raise ValueError(f"k_repeats must be >= 1 when set, got: {k_repeats}")
+    early_stopping_patience = data.get("early_stopping_patience", None)
+    if early_stopping_patience is not None:
+        early_stopping_patience = int(early_stopping_patience)
+        if early_stopping_patience < 1:
+            raise ValueError(
+                "early_stopping_patience must be >= 1 when set. "
+                "Use null to disable early stopping."
+            )
+    early_stopping_min_delta = float(data.get("early_stopping_min_delta", 0.0))
+    if early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta must be non-negative.")
     eeg_window_pre_ms = data.get("eeg_window_pre_ms", None)
     eeg_window_post_ms = data.get("eeg_window_post_ms", None)
     if eeg_window_pre_ms is None and eeg_window_post_ms is None:
@@ -385,6 +398,8 @@ def load_eeg_encoder_config(
         epochs=int(data["epochs"]),
         mse_loss_weight=float(data.get("mse_loss_weight", 0.5)),
         cosine_loss_weight=float(data.get("cosine_loss_weight", 0.5)),
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
         device=str(data["device"]),
         output_dir=str(data["output_dir"]),
         run_change_note=(
@@ -837,7 +852,10 @@ def _save_artifacts(
         "final_train_eval_loss": history["train_eval_loss"][-1],
         "final_valid_loss": history["valid_loss"][-1],
         "best_valid_loss": min(history["valid_loss"]),
-        "epochs": config.epochs,
+        "epochs": len(history["valid_loss"]),
+        "configured_epochs": config.epochs,
+        "early_stopping_patience": config.early_stopping_patience,
+        "early_stopping_min_delta": config.early_stopping_min_delta,
     }
     summary_path = output_dir / f"training_summary_{saved_at}.json"
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -929,6 +947,14 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         "Loss weights: "
         f"mse={config.mse_loss_weight}, cosine={config.cosine_loss_weight}"
     )
+    if config.early_stopping_patience is None:
+        print("Early stopping: disabled")
+    else:
+        print(
+            "Early stopping: "
+            f"patience={config.early_stopping_patience}, "
+            f"min_delta={config.early_stopping_min_delta}"
+        )
     print(f"Averaging mode: {config.averaging_mode}")
     print(f"k_repeats: {config.k_repeats}")
     print(
@@ -958,6 +984,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     history = {"train_loss": [], "train_eval_loss": [], "valid_loss": []}
     best_valid_loss = float("inf")
     best_epoch = 0
+    epochs_without_improvement = 0
     best_model_state_dict: Optional[dict[str, torch.Tensor]] = None
     for epoch in range(1, config.epochs + 1):
         train_metrics = _run_epoch_over_subjects(
@@ -1002,18 +1029,33 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         history["train_loss"].append(train_metrics["loss"])
         history["train_eval_loss"].append(train_eval_metrics["loss"])
         history["valid_loss"].append(valid_metrics["loss"])
-        if valid_metrics["loss"] < best_valid_loss:
-            best_valid_loss = float(valid_metrics["loss"])
+        valid_loss = float(valid_metrics["loss"])
+        improved = valid_loss < (best_valid_loss - config.early_stopping_min_delta)
+        if improved:
+            best_valid_loss = valid_loss
             best_epoch = int(epoch)
+            epochs_without_improvement = 0
             best_model_state_dict = {
                 k: v.detach().cpu().clone() for k, v in model.state_dict().items()
             }
+        else:
+            epochs_without_improvement += 1
         print(
             f"Epoch {epoch}/{config.epochs} | "
             f"train_mse={train_metrics['loss']:.6f} "
             f"train_eval_mse={train_eval_metrics['loss']:.6f} "
             f"valid_mse={valid_metrics['loss']:.6f}"
         )
+        if (
+            config.early_stopping_patience is not None
+            and epochs_without_improvement >= config.early_stopping_patience
+        ):
+            print(
+                "Early stopping triggered: "
+                f"no validation improvement greater than {config.early_stopping_min_delta} "
+                f"for {config.early_stopping_patience} epoch(s)."
+            )
+            break
 
     artifact_paths = _save_artifacts(
         output_dir=output_dir,

@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--mse-loss-weight", type=float)
     parser.add_argument("--cosine-loss-weight", type=float)
+    parser.add_argument("--early-stopping-patience", type=int)
+    parser.add_argument("--early-stopping-min-delta", type=float)
     parser.add_argument("--output-dir")
     parser.add_argument("--run-change-note")
     parser.add_argument("--device")
@@ -63,6 +65,8 @@ def main():
         "epochs": args.epochs,
         "mse_loss_weight": args.mse_loss_weight,
         "cosine_loss_weight": args.cosine_loss_weight,
+        "early_stopping_patience": args.early_stopping_patience,
+        "early_stopping_min_delta": args.early_stopping_min_delta,
         "output_dir": args.output_dir,
         "run_change_note": args.run_change_note,
         "device": args.device,
