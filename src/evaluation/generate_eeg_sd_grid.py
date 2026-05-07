@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strength", type=float, default=0.8)
     parser.add_argument("--guidance-scale", type=float, default=7.5)
     parser.add_argument("--num-inference-steps", type=int, default=30)
-    parser.add_argument("--seed", type=int, default=1022)
+    parser.add_argument("--seed", type=int, default=12)
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--lpips-net", default="alex", choices=["alex", "vgg", "squeeze"])
@@ -102,11 +102,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--negative-prompt",
-        default="low quality, blurry, distorted, deformed",
+        default="low quality, blurry, distorted, deformed, weird, unrealistic, incomplete",
     )
     parser.add_argument(
         "--prompt-template",
-        default="a realistic Mophotograph of a {label}",
+        default="a realistic photograph of a {label}",
         help="Template used for predicted classifier label prompts.",
     )
     parser.add_argument(

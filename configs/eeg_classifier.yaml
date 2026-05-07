@@ -37,6 +37,16 @@ class_indices: [
     1511,  # train
     1487,  # toilet
     1631,  # wolf
+    274,   # checkers
+    1408,  # sunflower
+    645,   # hairdryer
+    705,   # hot-air_balloon
+    736,   # jack
+    955,   # orangutan
+    1011,  # pencil
+    1036,  # piggy_bank
+    1548,  # tuxedo
+    1583,  # wallet
 ]
 # Optional display names matching class_indices. If omitted, names are inferred
 # from image_metadata.npy when possible.
