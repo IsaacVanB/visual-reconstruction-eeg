@@ -33,7 +33,12 @@ def parse_args():
     parser.add_argument("--weight-decay", type=float)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--mse-loss-weight", type=float)
-    parser.add_argument("--cosine-loss-weight", type=float)
+    parser.add_argument("--smooth-l1-loss-weight", type=float)
+    parser.add_argument(
+        "--cosine-loss-weight",
+        type=float,
+        help="Deprecated alias for --smooth-l1-loss-weight.",
+    )
     parser.add_argument("--early-stopping-patience", type=int)
     parser.add_argument("--early-stopping-min-delta", type=float)
     parser.add_argument("--output-dir")
@@ -76,6 +81,7 @@ def main():
         "weight_decay": args.weight_decay,
         "epochs": args.epochs,
         "mse_loss_weight": args.mse_loss_weight,
+        "smooth_l1_loss_weight": args.smooth_l1_loss_weight,
         "cosine_loss_weight": args.cosine_loss_weight,
         "early_stopping_patience": args.early_stopping_patience,
         "early_stopping_min_delta": args.early_stopping_min_delta,

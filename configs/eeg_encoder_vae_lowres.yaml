@@ -21,8 +21,8 @@ num_workers: 0
 lr: 0.001
 weight_decay: 0.0001
 epochs: 15
-mse_loss_weight: 1.0
-cosine_loss_weight: 0.0
+mse_loss_weight: 0.2
+smooth_l1_loss_weight: 0.8
 early_stopping_patience: 20
 early_stopping_min_delta: 0.001
 

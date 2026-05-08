@@ -148,7 +148,7 @@ class EEGEncoderConfig:
     weight_decay: float
     epochs: int
     mse_loss_weight: float
-    cosine_loss_weight: float
+    smooth_l1_loss_weight: float
     early_stopping_patience: Optional[int]
     early_stopping_min_delta: float
 
@@ -449,7 +449,9 @@ def load_eeg_encoder_config(
         weight_decay=float(data["weight_decay"]),
         epochs=int(data["epochs"]),
         mse_loss_weight=float(data.get("mse_loss_weight", 0.5)),
-        cosine_loss_weight=float(data.get("cosine_loss_weight", 0.5)),
+        smooth_l1_loss_weight=float(
+            data.get("smooth_l1_loss_weight", data.get("cosine_loss_weight", 0.5))
+        ),
         early_stopping_patience=early_stopping_patience,
         early_stopping_min_delta=early_stopping_min_delta,
         device=str(data["device"]),
@@ -856,7 +858,7 @@ def _run_epoch(
     loader: DataLoader,
     device: torch.device,
     mse_loss_weight: float,
-    cosine_loss_weight: float,
+    smooth_l1_loss_weight: float,
     optimizer: Optional[torch.optim.Optimizer] = None,
 ) -> dict[str, float]:
     is_train = optimizer is not None
@@ -881,12 +883,11 @@ def _run_epoch(
                     f"target shape {tuple(target.shape)}"
                 )
             
-            # Combined objective with configurable per-term weights.
             mse_loss = F.mse_loss(pred, target, reduction="mean")
-            cosine_loss = (1.0 - F.cosine_similarity(pred, target, dim=1)).mean()
-            loss = (mse_loss_weight * mse_loss) + (cosine_loss_weight * cosine_loss)
-            
-            #loss = F.smooth_l1_loss(pred, target, reduction="mean")
+            smooth_l1_loss = F.smooth_l1_loss(pred, target, reduction="mean")
+            loss = (mse_loss_weight * mse_loss) + (
+                smooth_l1_loss_weight * smooth_l1_loss
+            )
             if is_train:
                 loss.backward()
                 optimizer.step()
@@ -921,7 +922,7 @@ def _run_epoch_over_subjects(
     split: str,
     device: torch.device,
     mse_loss_weight: float,
-    cosine_loss_weight: float,
+    smooth_l1_loss_weight: float,
     eeg_zscore_stats: Optional[dict[str, Any]],
     target_zscore_stats: Optional[dict[str, Any]],
     optimizer: Optional[torch.optim.Optimizer] = None,
@@ -951,7 +952,7 @@ def _run_epoch_over_subjects(
                 loader=loader,
                 device=device,
                 mse_loss_weight=mse_loss_weight,
-                cosine_loss_weight=cosine_loss_weight,
+                smooth_l1_loss_weight=smooth_l1_loss_weight,
                 optimizer=optimizer,
             )
         )
@@ -1179,7 +1180,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             )
     print(
         "Loss weights: "
-        f"mse={config.mse_loss_weight}, cosine={config.cosine_loss_weight}"
+        f"mse={config.mse_loss_weight}, smooth_l1={config.smooth_l1_loss_weight}"
     )
     if config.early_stopping_patience is None:
         print("Early stopping: disabled")
@@ -1227,7 +1228,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             split="train",
             device=device,
             mse_loss_weight=config.mse_loss_weight,
-            cosine_loss_weight=config.cosine_loss_weight,
+            smooth_l1_loss_weight=config.smooth_l1_loss_weight,
             eeg_zscore_stats=eeg_zscore_stats,
             target_zscore_stats=target_zscore_stats,
             optimizer=optimizer,
@@ -1241,7 +1242,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             split="train",
             device=device,
             mse_loss_weight=config.mse_loss_weight,
-            cosine_loss_weight=config.cosine_loss_weight,
+            smooth_l1_loss_weight=config.smooth_l1_loss_weight,
             eeg_zscore_stats=eeg_zscore_stats,
             target_zscore_stats=target_zscore_stats,
             optimizer=None,
@@ -1255,7 +1256,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             split="valid",
             device=device,
             mse_loss_weight=config.mse_loss_weight,
-            cosine_loss_weight=config.cosine_loss_weight,
+            smooth_l1_loss_weight=config.smooth_l1_loss_weight,
             eeg_zscore_stats=eeg_zscore_stats,
             target_zscore_stats=target_zscore_stats,
             optimizer=None,
@@ -1279,9 +1280,9 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             epochs_without_improvement += 1
         print(
             f"Epoch {epoch}/{config.epochs} | "
-            f"train_mse={train_metrics['loss']:.6f} "
-            f"train_eval_mse={train_eval_metrics['loss']:.6f} "
-            f"valid_mse={valid_metrics['loss']:.6f}"
+            f"train_loss={train_metrics['loss']:.6f} "
+            f"train_eval_loss={train_eval_metrics['loss']:.6f} "
+            f"valid_loss={valid_metrics['loss']:.6f}"
         )
         if (
             config.early_stopping_patience is not None
