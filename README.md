@@ -46,19 +46,25 @@ Example reconstructions:
            <image files>
    ```
 
-5. Extract image targets for the EEG encoder. This command writes full SD-VAE latents and standardized PCA latents to `latents/`.
+5. Extract image targets for the EEG encoder. The low-res pipeline uses full
+   SD-VAE latents from `latents/img_full`; the training dataset downsamples
+   them to the configured low-resolution target size at runtime.
 
    ```bash
    python scripts/vae_extract_image_embeds.py \
-     --embedding-type both \
+     --dataset-root datasets \
+     --output-root latents \
+     --embedding-type full \
      --full-dir-name img_full \
-     --pca-dir-name img_pca_4 \
-     --n-components 4 \
-     --standardize-pca \
-     --pca-scope train \
+     --vae-name stabilityai/sd-vae-ft-mse \
+     --image-size 512 \
+     --class-subset all \
+     --split-seed 0 \
+     --device cuda
    ```
 
-   If you use a different PCA dimensionality, set `image_latent_root` and `output_dim` in `configs/eeg_encoder.yaml` to the same dimension.
+   The default low-res config expects `image_latent_root: latents/img_full`,
+   `target_latent_size: 8`, and `output_dim: 256`.
 
 ## Quick Training And Testing
 
@@ -66,36 +72,52 @@ Train the EEG encoder:
 
 ```bash
 python scripts/train_eeg_encoder.py \
-  --config configs/eeg_encoder.yaml \
-  --image-latent-root latents/img_pca_4 \
-  --output-dim 4 \
-  --output-dir outputs/eeg_encoder \
+  --config configs/eeg_encoder_vae_lowres.yaml \
+  --dataset-root datasets \
+  --image-latent-root latents/img_full \
+  --target-type vae_lowres \
+  --target-latent-size 8 \
+  --output-dim 256 \
+  --output-dir outputs/eeg_encoder_vae_lowres/run_YYYYMMDD_HHMMSS \
+  --device cuda
 ```
 
 Evaluate an encoder checkpoint and save decoded reconstructions:
 
 ```bash
 python src/evaluation/eval_eeg_encoder.py \
-  --checkpoint-path outputs/eeg_encoder/eeg_encoder_best_YYYYMMDD_HHMMSS.pt \
-  --latent-root latents/img_pca_4 \
+  --checkpoint-path outputs/eeg_encoder_vae_lowres/run_YYYYMMDD_HHMMSS/eeg_encoder_best_YYYYMMDD_HHMMSS.pt \
+  --dataset-root datasets \
+  --latent-root latents/img_full \
+  --metadata-path latents/img_full_metadata.json \
+  --decode-latent-scaling auto \
+  --vae-name stabilityai/sd-vae-ft-mse \
+  --latent-shape 4 64 64 \
+  --batch-size 4 \
   --max-samples 16 \
   --grid-images 8 \
+  --device cuda \
+  --output-dir outputs/eeg_encoder_vae_lowres/run_YYYYMMDD_HHMMSS/eval
 ```
 
 For a full train-then-evaluate run with a timestamped output directory:
 
 ```bash
 bash scripts/run_eeg_encoder_experiment.sh \
-  --config configs/eeg_encoder.yaml \
-  --eval --max-samples 16 --grid-images 8 \
+  --config configs/eeg_encoder_vae_lowres.yaml \
+  --eval --max-samples 16 --grid-images 8
 ```
 
-Train the 20-class EEG classifier:
+`scripts/run_eeg_encoder_experiment.sh` skips the SSIM/LPIPS baseline step for
+`vae_lowres` checkpoints because the baseline comparison script does not support
+low-res VAE targets yet.
+
+Train the EEG classifier:
 
 ```bash
 python scripts/train_eeg_classifier.py \
   --config configs/eeg_classifier.yaml \
-  --dataset-root datasets \
+  --dataset-root datasets/classifier20 \
   --subjects all \
   --output-dir outputs/eeg_classifier \
   --device cuda
@@ -110,4 +132,4 @@ python scripts/eval_eeg_classifier.py \
   --device cuda
 ```
 
-Training artifacts are written under `outputs/eeg_encoder/` and `outputs/eeg_classifier/`. Evaluation writes decoded images, reconstruction grids, metrics, predictions, and confusion matrices under each run's `eval/` directory.
+Training artifacts are written under `outputs/eeg_encoder_vae_lowres/` and `outputs/eeg_classifier/`. Evaluation writes decoded images, reconstruction grids, metrics, predictions, and confusion matrices under each run's `eval/` directory.
