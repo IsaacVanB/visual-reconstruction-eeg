@@ -406,6 +406,38 @@ def _compute_gt_lowres_vae_latent_from_image(
     return torch.nn.functional.interpolate(z_full, **interpolate_kwargs).flatten(start_dim=1)
 
 
+def _load_target_zscore_stats(
+    saved_cfg: dict,
+    lowres_shape: tuple[int, int, int],
+    device: torch.device,
+) -> dict[str, torch.Tensor] | None:
+    mean = saved_cfg.get("target_zscore_mean")
+    std = saved_cfg.get("target_zscore_std")
+    if mean is None or std is None:
+        return None
+    expected = int(lowres_shape[0]) * int(lowres_shape[1]) * int(lowres_shape[2])
+    mean_t = torch.as_tensor(mean, device=device, dtype=torch.float32).flatten()
+    std_t = torch.as_tensor(std, device=device, dtype=torch.float32).flatten()
+    if mean_t.numel() != expected or std_t.numel() != expected:
+        raise ValueError(
+            "Checkpoint target zscore stats do not match lowres VAE target shape: "
+            f"mean={mean_t.numel()} std={std_t.numel()} expected={expected}."
+        )
+    return {"mean": mean_t, "std": std_t}
+
+
+def _unnormalize_lowres_target(
+    pred_low_flat: torch.Tensor,
+    target_zscore_stats: dict[str, torch.Tensor] | None,
+) -> torch.Tensor:
+    if target_zscore_stats is None:
+        return pred_low_flat
+    return (
+        pred_low_flat.flatten(start_dim=1) * target_zscore_stats["std"].unsqueeze(0)
+        + target_zscore_stats["mean"].unsqueeze(0)
+    )
+
+
 def main():
     args = parse_args()
 
@@ -514,6 +546,7 @@ def main():
     full_latent_shape = (int(c), int(h), int(w))
     pca = None
     lowres_shape = None
+    target_zscore_stats = None
     target_row_label = "Target (PCA)"
     if target_type == "pca":
         pca_params_path = resolve_pca_params_path(
@@ -543,6 +576,11 @@ def main():
                 f"Encoder output_dim ({saved_cfg.get('output_dim')}) does not match "
                 f"lowres VAE target dim ({expected_output_dim})."
             )
+        target_zscore_stats = _load_target_zscore_stats(
+            saved_cfg=saved_cfg,
+            lowres_shape=lowres_shape,
+            device=device_t,
+        )
         target_row_label = "Target (Lowres VAE)"
 
     AutoencoderKL = load_autoencoder_kl_class()
@@ -570,6 +608,10 @@ def main():
         print(f"PCA shape: k={pca['k']}, D={pca['d']}")
     else:
         print(f"Lowres VAE shape: {lowres_shape}; full VAE shape: {full_latent_shape}")
+        if target_zscore_stats is None:
+            print("Lowres VAE target zscore: unavailable")
+        else:
+            print("Lowres VAE target zscore: loaded from checkpoint")
     print(f"Scaling factor: {scaling_factor}")
     if target_type == "pca":
         print(f"PCA standardized: {pca['standardized']}")
@@ -617,8 +659,12 @@ def main():
             else:
                 if lowres_shape is None:
                     raise RuntimeError("Lowres VAE shape was not resolved.")
-                recon_01 = decode_from_lowres_vae_prediction(
+                pred_decode_latent = _unnormalize_lowres_target(
                     pred_low_flat=pred_latent,
+                    target_zscore_stats=target_zscore_stats,
+                )
+                recon_01 = decode_from_lowres_vae_prediction(
+                    pred_low_flat=pred_decode_latent,
                     lowres_shape=lowres_shape,
                     full_latent_shape=full_latent_shape,
                     vae=vae,

@@ -138,6 +138,7 @@ class EEGEncoderConfig:
     vae_latent_size: int
     target_latent_size: Optional[int]
     target_downsample_mode: str
+    target_zscore_eps: float
 
     # Optimization knobs:
     batch_size: int
@@ -440,6 +441,7 @@ def load_eeg_encoder_config(
         vae_latent_size=vae_latent_size,
         target_latent_size=target_latent_size,
         target_downsample_mode=target_downsample_mode,
+        target_zscore_eps=float(data.get("target_zscore_eps", 1e-6)),
         batch_size=int(data["batch_size"]),
         subject_chunk_size=max(1, int(data.get("subject_chunk_size", 1))),
         num_workers=int(data["num_workers"]),
@@ -535,7 +537,10 @@ def _build_encoder_eeg_transform(
     )
 
 
-def _build_latent_target_transform(config: EEGEncoderConfig):
+def _build_latent_target_transform(
+    config: EEGEncoderConfig,
+    target_zscore_stats: Optional[dict[str, Any]] = None,
+):
     target_type = str(config.target_type).lower()
     if target_type == "pca":
         return None
@@ -549,6 +554,19 @@ def _build_latent_target_transform(config: EEGEncoderConfig):
     full_size = int(config.vae_latent_size)
     low_size = int(config.target_latent_size)
     mode = str(config.target_downsample_mode).lower()
+    zscore_mean = None
+    zscore_std = None
+    if target_zscore_stats is not None:
+        zscore_mean = torch.as_tensor(target_zscore_stats["mean"], dtype=torch.float32).view(
+            latent_channels,
+            low_size,
+            low_size,
+        )
+        zscore_std = torch.as_tensor(target_zscore_stats["std"], dtype=torch.float32).view(
+            latent_channels,
+            low_size,
+            low_size,
+        )
 
     def transform(latent: torch.Tensor) -> torch.Tensor:
         if not torch.is_tensor(latent):
@@ -575,7 +593,10 @@ def _build_latent_target_transform(config: EEGEncoderConfig):
         interpolate_kwargs: dict[str, Any] = {"size": (low_size, low_size), "mode": mode}
         if mode == "bilinear":
             interpolate_kwargs["align_corners"] = False
-        return F.interpolate(z.unsqueeze(0), **interpolate_kwargs).squeeze(0)
+        z_low = F.interpolate(z.unsqueeze(0), **interpolate_kwargs).squeeze(0)
+        if zscore_mean is not None and zscore_std is not None:
+            z_low = (z_low - zscore_mean) / zscore_std
+        return z_low
 
     return transform
 
@@ -585,8 +606,12 @@ def _make_subject_dataset_with_transform(
     subject: str,
     split: str,
     eeg_transform,
+    target_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> EEGImageLatentDataset:
-    latent_transform = _build_latent_target_transform(config)
+    latent_transform = _build_latent_target_transform(
+        config=config,
+        target_zscore_stats=target_zscore_stats,
+    )
     if config.averaging_mode == "none":
         dataset = EEGImageLatentDataset(
             dataset_root=config.dataset_root,
@@ -626,6 +651,7 @@ def _make_subject_chunk_loader_with_stats(
     shuffle: bool,
     drop_last: bool,
     eeg_zscore_stats: Optional[dict[str, Any]],
+    target_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> DataLoader:
     subjects = tuple(str(subject) for subject in subjects)
     if not subjects:
@@ -641,6 +667,7 @@ def _make_subject_chunk_loader_with_stats(
             subject=subject,
             split=split,
             eeg_transform=eeg_transform,
+            target_zscore_stats=target_zscore_stats,
         )
         for subject in subjects
     ]
@@ -663,6 +690,7 @@ def _make_subject_loader_with_stats(
     shuffle: bool,
     drop_last: bool,
     eeg_zscore_stats: Optional[dict[str, Any]],
+    target_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> DataLoader:
     return _make_subject_chunk_loader_with_stats(
         config=config,
@@ -671,6 +699,7 @@ def _make_subject_loader_with_stats(
         shuffle=shuffle,
         drop_last=drop_last,
         eeg_zscore_stats=eeg_zscore_stats,
+        target_zscore_stats=target_zscore_stats,
     )
 
 
@@ -682,6 +711,7 @@ def _make_loader(config: EEGEncoderConfig, split: str, shuffle: bool, drop_last:
         shuffle=shuffle,
         drop_last=drop_last,
         eeg_zscore_stats=None,
+        target_zscore_stats=None,
     )
 
 
@@ -691,6 +721,7 @@ def _make_loader_with_stats(
     shuffle: bool,
     drop_last: bool,
     eeg_zscore_stats: Optional[dict[str, Any]],
+    target_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> DataLoader:
     return _make_subject_chunk_loader_with_stats(
         config=config,
@@ -699,6 +730,7 @@ def _make_loader_with_stats(
         shuffle=shuffle,
         drop_last=drop_last,
         eeg_zscore_stats=eeg_zscore_stats,
+        target_zscore_stats=target_zscore_stats,
     )
 
 
@@ -757,6 +789,65 @@ def _compute_train_eeg_channel_stats(config: EEGEncoderConfig) -> dict[str, Any]
         "mean": mean.tolist(),
         "std": std.tolist(),
         "eps": float(config.eeg_zscore_eps),
+    }
+
+
+def _load_pt_tensor(path: str | Path) -> torch.Tensor:
+    try:
+        tensor = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        tensor = torch.load(path, map_location="cpu")
+    if not torch.is_tensor(tensor):
+        raise TypeError(f"Expected tensor in {path}, got {type(tensor)}")
+    return tensor
+
+
+def _compute_train_target_zscore_stats(config: EEGEncoderConfig) -> Optional[dict[str, Any]]:
+    if str(config.target_type).lower() != "vae_lowres":
+        return None
+
+    dataset = EEGImageLatentDataset(
+        dataset_root=config.dataset_root,
+        latent_root=config.latent_root,
+        subject=config.subjects[0],
+        split="train",
+        class_indices=config.class_indices,
+        transform=None,
+        split_seed=config.split_seed,
+    )
+    latent_transform = _build_latent_target_transform(config=config, target_zscore_stats=None)
+    if latent_transform is None:
+        return None
+
+    latent_sum = None
+    latent_sumsq = None
+    count = 0
+    for image_index in np.asarray(dataset._split_image_indices, dtype=np.int64):
+        latent_path = dataset._resolve_latent_path(int(image_index))
+        z_low = latent_transform(_load_pt_tensor(latent_path)).flatten().to(dtype=torch.float64)
+        if latent_sum is None:
+            latent_sum = torch.zeros_like(z_low, dtype=torch.float64)
+            latent_sumsq = torch.zeros_like(z_low, dtype=torch.float64)
+        latent_sum += z_low
+        latent_sumsq += z_low.square()
+        count += 1
+
+    if latent_sum is None or latent_sumsq is None or count <= 0:
+        raise ValueError("No train VAE latents available to compute target zscore stats.")
+    mean64 = latent_sum / float(count)
+    variance64 = (latent_sumsq / float(count)) - mean64.square()
+    variance64 = torch.clamp(variance64, min=0.0)
+    std64 = torch.sqrt(variance64).clamp_min(float(config.target_zscore_eps))
+    return {
+        "mean": mean64.to(dtype=torch.float32).tolist(),
+        "std": std64.to(dtype=torch.float32).tolist(),
+        "eps": float(config.target_zscore_eps),
+        "num_images": int(count),
+        "shape": [
+            int(config.vae_latent_channels),
+            int(config.target_latent_size or 0),
+            int(config.target_latent_size or 0),
+        ],
     }
 
 
@@ -832,6 +923,7 @@ def _run_epoch_over_subjects(
     mse_loss_weight: float,
     cosine_loss_weight: float,
     eeg_zscore_stats: Optional[dict[str, Any]],
+    target_zscore_stats: Optional[dict[str, Any]],
     optimizer: Optional[torch.optim.Optimizer] = None,
     shuffle: bool = False,
     drop_last: bool = False,
@@ -851,6 +943,7 @@ def _run_epoch_over_subjects(
             shuffle=shuffle,
             drop_last=drop_last,
             eeg_zscore_stats=eeg_zscore_stats,
+            target_zscore_stats=target_zscore_stats,
         )
         metrics.append(
             _run_epoch(
@@ -871,6 +964,7 @@ def _count_samples_for_split(
     config: EEGEncoderConfig,
     split: str,
     eeg_zscore_stats: Optional[dict[str, Any]],
+    target_zscore_stats: Optional[dict[str, Any]],
 ) -> int:
     total = 0
     for subject_chunk in _subject_chunks(config.subjects, config.subject_chunk_size):
@@ -881,6 +975,7 @@ def _count_samples_for_split(
             shuffle=False,
             drop_last=False,
             eeg_zscore_stats=eeg_zscore_stats,
+            target_zscore_stats=target_zscore_stats,
         )
         total += len(loader.dataset)
         del loader
@@ -897,6 +992,7 @@ def _save_artifacts(
     best_epoch: Optional[int] = None,
     best_valid_loss: Optional[float] = None,
     eeg_zscore_stats: Optional[dict[str, Any]] = None,
+    target_zscore_stats: Optional[dict[str, Any]] = None,
 ) -> dict[str, Path]:
     saved_at = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Final checkpoint: weights from the last training epoch.
@@ -912,6 +1008,15 @@ def _save_artifacts(
         config_payload["eeg_zscore_mean"] = eeg_zscore_stats["mean"]
         config_payload["eeg_zscore_std"] = eeg_zscore_stats["std"]
         config_payload["eeg_zscore_eps"] = float(eeg_zscore_stats.get("eps", config.eeg_zscore_eps))
+    if target_zscore_stats is not None:
+        config_payload["target_zscore_mean"] = target_zscore_stats["mean"]
+        config_payload["target_zscore_std"] = target_zscore_stats["std"]
+        config_payload["target_zscore_eps"] = float(
+            target_zscore_stats.get("eps", config.target_zscore_eps)
+        )
+        config_payload["target_zscore_num_images"] = int(
+            target_zscore_stats.get("num_images", 0)
+        )
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -920,6 +1025,7 @@ def _save_artifacts(
             "model_architecture": model_architecture_name,
             "model_architecture_params": arch_metadata,
             "eeg_zscore_stats": eeg_zscore_stats,
+            "target_zscore_stats": target_zscore_stats,
             "saved_at": saved_at,
         },
         ckpt_path,
@@ -933,6 +1039,7 @@ def _save_artifacts(
                 "model_architecture": model_architecture_name,
                 "model_architecture_params": arch_metadata,
                 "eeg_zscore_stats": eeg_zscore_stats,
+                "target_zscore_stats": target_zscore_stats,
                 "saved_at": saved_at,
                 "best_epoch": int(best_epoch) if best_epoch is not None else None,
                 "best_valid_loss": float(best_valid_loss) if best_valid_loss is not None else None,
@@ -998,6 +1105,9 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     if str(config.eeg_normalization).lower() == "zscore":
         eeg_zscore_stats = _compute_train_eeg_channel_stats(config=config)
         print("Computed train-set EEG zscore stats.")
+    target_zscore_stats = _compute_train_target_zscore_stats(config=config)
+    if target_zscore_stats is not None:
+        print("Computed train-set target zscore stats.")
 
     sample_loader = _make_subject_loader_with_stats(
         config=config,
@@ -1006,6 +1116,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         shuffle=False,
         drop_last=False,
         eeg_zscore_stats=eeg_zscore_stats,
+        target_zscore_stats=target_zscore_stats,
     )
     sample_eeg, sample_latent, _ = sample_loader.dataset[0]
     eeg_channels = int(sample_eeg.shape[0])
@@ -1061,6 +1172,11 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             f"low=({config.vae_latent_channels}, {config.target_latent_size}, {config.target_latent_size}), "
             f"downsample={config.target_downsample_mode}"
         )
+        if target_zscore_stats is not None:
+            print(
+                "VAE lowres target normalization: "
+                f"zscore over {target_zscore_stats['num_images']} train images"
+            )
     print(
         "Loss weights: "
         f"mse={config.mse_loss_weight}, cosine={config.cosine_loss_weight}"
@@ -1077,15 +1193,15 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     print(f"k_repeats: {config.k_repeats}")
     print(
         "Train samples: "
-        f"{_count_samples_for_split(config, 'train', eeg_zscore_stats)}"
+        f"{_count_samples_for_split(config, 'train', eeg_zscore_stats, target_zscore_stats)}"
     )
     print(
         "Train-eval samples: "
-        f"{_count_samples_for_split(config, 'train', eeg_zscore_stats)}"
+        f"{_count_samples_for_split(config, 'train', eeg_zscore_stats, target_zscore_stats)}"
     )
     print(
         "Valid samples: "
-        f"{_count_samples_for_split(config, 'valid', eeg_zscore_stats)}"
+        f"{_count_samples_for_split(config, 'valid', eeg_zscore_stats, target_zscore_stats)}"
     )
     print(f"EEG sample shape: ({eeg_channels}, {eeg_timesteps})")
     print(f"Latent target dim: {target_dim}")
@@ -1113,6 +1229,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             mse_loss_weight=config.mse_loss_weight,
             cosine_loss_weight=config.cosine_loss_weight,
             eeg_zscore_stats=eeg_zscore_stats,
+            target_zscore_stats=target_zscore_stats,
             optimizer=optimizer,
             shuffle=True,
             drop_last=True,
@@ -1126,6 +1243,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             mse_loss_weight=config.mse_loss_weight,
             cosine_loss_weight=config.cosine_loss_weight,
             eeg_zscore_stats=eeg_zscore_stats,
+            target_zscore_stats=target_zscore_stats,
             optimizer=None,
             shuffle=False,
             drop_last=False,
@@ -1139,6 +1257,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
             mse_loss_weight=config.mse_loss_weight,
             cosine_loss_weight=config.cosine_loss_weight,
             eeg_zscore_stats=eeg_zscore_stats,
+            target_zscore_stats=target_zscore_stats,
             optimizer=None,
             shuffle=False,
             drop_last=False,
@@ -1184,6 +1303,7 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
         best_epoch=best_epoch if best_epoch > 0 else None,
         best_valid_loss=best_valid_loss if best_epoch > 0 else None,
         eeg_zscore_stats=eeg_zscore_stats,
+        target_zscore_stats=target_zscore_stats,
     )
     print(f"Saved checkpoint: {artifact_paths['checkpoint']}")
     print(f"Saved best checkpoint: {artifact_paths['best_checkpoint']}")

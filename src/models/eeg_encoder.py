@@ -4,18 +4,6 @@ import torch
 from torch import nn
 
 
-class AttentionPool1d(nn.Module):
-    """Learn a weighted average over time for features shaped [B, C, T]."""
-
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.score = nn.Conv1d(channels, 1, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        weights = torch.softmax(self.score(x), dim=-1)
-        return (x * weights).sum(dim=-1)
-
-
 class EEGEncoderCNN(nn.Module):
     """EEGNet-style CNN encoder for EEG trials shaped [B, C, T]."""
 
@@ -93,12 +81,17 @@ class EEGEncoderCNN(nn.Module):
             nn.Dropout2d(p=0.1),
         )
         self.feature_dim = 128
-        self.attn_pool = AttentionPool1d(self.feature_dim)
+        self.pool_bins = 8
+        self.pool = nn.AdaptiveAvgPool1d(self.pool_bins)
         self.head = nn.Sequential(
-            nn.Linear(self.feature_dim, 512),
+            nn.Flatten(),
+            nn.Linear(self.feature_dim * self.pool_bins, 512),
             nn.GELU(),
             nn.Dropout(p=0.2),
-            nn.Linear(512, output_dim),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(256, output_dim),
         )
 
     def _forward_features(self, x: torch.Tensor) -> torch.Tensor:
@@ -114,8 +107,9 @@ class EEGEncoderCNN(nn.Module):
             )
         x = x.unsqueeze(1)  # [B, 1, C, T]
         x = self.features(x)
-        x = x.squeeze(2)  # [B, 128, T']
-        return self.attn_pool(x)
+        x = x.squeeze(2)    # [B, 128, T']
+        x = self.pool(x)    # [B, 128, 8]
+        return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._forward_features(x)
@@ -132,7 +126,7 @@ def infer_eeg_shape(sample: torch.Tensor) -> Tuple[int, int]:
 def extract_eeg_encoder_cnn_arch_metadata(_model: EEGEncoderCNN) -> dict[str, Any]:
     """Serialize architecture-defining values for robust checkpoint reload validation."""
     return {
-        "frontend": "eegnet_depthwise_separable_attention",
+        "frontend": "eegnet_depthwise_separable_adaptive_pool",
         "input_shape": [
             int(_model.eeg_channels),
             int(_model.eeg_timesteps),
@@ -165,9 +159,11 @@ def extract_eeg_encoder_cnn_arch_metadata(_model: EEGEncoderCNN) -> dict[str, An
         ],
         "norm": "groupnorm",
         "activation": "gelu",
-        "pool": "attention_pool_time",
+        "pool": "adaptive_avg_pool_time",
+        "pool_bins": int(_model.pool_bins),
         "feature_dim": int(_model.feature_dim),
-        "head_hidden_dim": 512,
+        "head_input_dim": int(_model.feature_dim * _model.pool_bins),
+        "head_hidden_dims": [512, 256],
         "feature_dropout2d": 0.1,
-        "head_dropout": 0.2,
+        "head_dropout": [0.2, 0.2],
     }

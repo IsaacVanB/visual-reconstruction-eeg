@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--vae-latent-size", type=int)
     parser.add_argument("--target-latent-size", type=int)
     parser.add_argument("--target-downsample-mode", choices=["area", "bilinear"])
+    parser.add_argument("--target-zscore-eps", type=float)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--subject-chunk-size", type=int)
     parser.add_argument("--num-workers", type=int)
@@ -67,6 +68,7 @@ def main():
         "vae_latent_size": args.vae_latent_size,
         "target_latent_size": args.target_latent_size,
         "target_downsample_mode": args.target_downsample_mode,
+        "target_zscore_eps": args.target_zscore_eps,
         "batch_size": args.batch_size,
         "subject_chunk_size": args.subject_chunk_size,
         "num_workers": args.num_workers,

@@ -11,6 +11,7 @@ vae_latent_channels: 4
 vae_latent_size: 64
 target_latent_size: 8
 target_downsample_mode: area
+target_zscore_eps: 1.0e-6
 output_dim: 256
 
 # Optimization
@@ -18,17 +19,17 @@ batch_size: 64
 subject_chunk_size: 3
 num_workers: 0
 lr: 0.001
-weight_decay: 0.001
+weight_decay: 0.0001
 epochs: 15
 mse_loss_weight: 1.0
 cosine_loss_weight: 0.0
-early_stopping_patience: 5
-early_stopping_min_delta: 0.0
+early_stopping_patience: 20
+early_stopping_min_delta: 0.001
 
 # Runtime/output
 device: auto
 output_dir: outputs/eeg_encoder_vae_lowres
-run_change_note: "Target downsampled VAE latents at 4x8x8"
+run_change_note: "Changed pooling and forward features in encoder model"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -43,7 +44,7 @@ eeg_window_post_ms: 500
 # - none: use individual trials/repeats as separate training examples
 # - all: average all repeats per stimulus
 # - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
-averaging_mode: none
+averaging_mode: all
 
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]
