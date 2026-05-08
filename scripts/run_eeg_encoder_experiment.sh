@@ -28,6 +28,10 @@ Examples:
   scripts/run_eeg_encoder_experiment.sh
 
   scripts/run_eeg_encoder_experiment.sh \
+    --config configs/eeg_encoder_vae_lowres.yaml \
+    --eval --max-samples 16 --grid-images 8
+
+  scripts/run_eeg_encoder_experiment.sh \
     --config configs/eeg_encoder.yaml \
     --epochs 40 \
     --batch-size 32 \
@@ -45,6 +49,7 @@ EOF
 }
 
 OUTPUT_BASE="outputs/eeg_encoder"
+OUTPUT_BASE_EXPLICIT=0
 RUN_NAME=""
 SKIP_EVAL=0
 SKIP_BASELINE=0
@@ -68,6 +73,39 @@ run_python() {
   "${cmd[@]}"
 }
 
+checkpoint_target_type() {
+  local checkpoint="$1"
+  python -c 'import sys, warnings, torch; warnings.filterwarnings("ignore", category=FutureWarning);
+try:
+    ckpt = torch.load(sys.argv[1], map_location="cpu", weights_only=True)
+except TypeError:
+    ckpt = torch.load(sys.argv[1], map_location="cpu")
+print(ckpt.get("config", {}).get("target_type", "pca"))' "$checkpoint"
+}
+
+train_config_path() {
+  local idx=0
+  while [[ "$idx" -lt "${#train_args[@]}" ]]; do
+    if [[ "${train_args[$idx]}" == "--config" ]]; then
+      local next=$((idx + 1))
+      if [[ "$next" -lt "${#train_args[@]}" ]]; then
+        printf '%s\n' "${train_args[$next]}"
+        return 0
+      fi
+    elif [[ "${train_args[$idx]}" == --config=* ]]; then
+      printf '%s\n' "${train_args[$idx]#--config=}"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+  printf '%s\n' "configs/eeg_encoder.yaml"
+}
+
+config_output_dir() {
+  local config_path="$1"
+  python -c 'import sys, yaml; data=yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8")) or {}; print(data.get("output_dir", ""))' "$config_path"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help|-h)
@@ -76,6 +114,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-base)
       OUTPUT_BASE="$2"
+      OUTPUT_BASE_EXPLICIT=1
       shift 2
       ;;
     --run-name)
@@ -129,6 +168,13 @@ if [[ -n "$CHECKPOINT_PATH" ]]; then
   printf 'Run directory: %s\n' "$RUN_DIR"
   printf 'Skipping training and resuming from checkpoint: %s\n' "$checkpoint_path"
 else
+  if [[ "$OUTPUT_BASE_EXPLICIT" -eq 0 ]]; then
+    config_path="$(train_config_path)"
+    configured_output_dir="$(config_output_dir "$config_path")"
+    if [[ -n "$configured_output_dir" ]]; then
+      OUTPUT_BASE="$configured_output_dir"
+    fi
+  fi
   RUN_DIR="${OUTPUT_BASE%/}/$RUN_NAME"
   mkdir -p "$RUN_DIR"
 
@@ -156,6 +202,9 @@ else
   printf 'Training complete. Checkpoint: %s\n' "$checkpoint_path"
 fi
 
+TARGET_TYPE="$(checkpoint_target_type "$checkpoint_path")"
+printf 'Checkpoint target type: %s\n' "$TARGET_TYPE"
+
 if [[ "$SKIP_EVAL" -eq 1 ]]; then
   printf 'Skipping evaluation (--skip-eval).\n'
 else
@@ -179,6 +228,11 @@ fi
 
 if [[ "$SKIP_BASELINE" -eq 1 ]]; then
   printf 'Skipping baseline comparison eval (--skip-baseline).\n'
+  exit 0
+fi
+
+if [[ "$TARGET_TYPE" != "pca" ]]; then
+  printf 'Skipping baseline comparison eval: eval_eeg_with_mean_baselines.py currently supports PCA targets only.\n'
   exit 0
 fi
 
