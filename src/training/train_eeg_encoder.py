@@ -22,6 +22,8 @@ DEFAULT_CLASS_INDICES_1000 = list(range(0, 2000, 2))
 SUPPORTED_CLASS_SUBSETS = {"default100", "default1000", "all"}
 SUPPORTED_EEG_NORMALIZATION = {"l2", "zscore", "none"}
 SUPPORTED_AVERAGING_MODES = {"all", "random_k", "none"}
+SUPPORTED_TARGET_TYPES = {"pca", "vae_lowres"}
+SUPPORTED_LOWRES_DOWNSAMPLE_MODES = {"area", "bilinear"}
 REQUIRED_CONFIG_KEYS = (
     "dataset_root",
     "split_seed",
@@ -101,6 +103,19 @@ def _resolve_latent_root_for_output_dim(latent_root: str, output_dim: int) -> st
     return raw
 
 
+def _resolve_latent_root_for_target_type(
+    latent_root: str,
+    output_dim: int,
+    target_type: str,
+) -> str:
+    if str(target_type).lower() == "pca":
+        return _resolve_latent_root_for_output_dim(
+            latent_root=latent_root,
+            output_dim=output_dim,
+        )
+    return str(latent_root)
+
+
 @dataclass
 class EEGEncoderConfig:
     # Data roots/splits:
@@ -115,9 +130,14 @@ class EEGEncoderConfig:
     class_indices: Optional[Sequence[int]]
 
     # Model architecture knobs:
-    # - output_dim MUST match PCA latent dimension (k) used as target.
+    # - output_dim MUST match the flattened target dimension.
     # - temporal/pooling/dropout are tuned directly in src/models/eeg_encoder.py.
     output_dim: int
+    target_type: str
+    vae_latent_channels: int
+    vae_latent_size: int
+    target_latent_size: Optional[int]
+    target_downsample_mode: str
 
     # Optimization knobs:
     batch_size: int
@@ -308,6 +328,30 @@ def load_eeg_encoder_config(
             f"averaging_mode must be one of {sorted(SUPPORTED_AVERAGING_MODES)}, "
             f"got: {averaging_mode}"
         )
+    target_type = str(data.get("target_type", "pca")).lower()
+    if target_type not in SUPPORTED_TARGET_TYPES:
+        raise ValueError(
+            f"target_type must be one of {sorted(SUPPORTED_TARGET_TYPES)}, got: {target_type}"
+        )
+    target_downsample_mode = str(data.get("target_downsample_mode", "area")).lower()
+    if target_downsample_mode not in SUPPORTED_LOWRES_DOWNSAMPLE_MODES:
+        raise ValueError(
+            "target_downsample_mode must be one of "
+            f"{sorted(SUPPORTED_LOWRES_DOWNSAMPLE_MODES)}, got: {target_downsample_mode}"
+        )
+    vae_latent_channels = int(data.get("vae_latent_channels", 4))
+    vae_latent_size = int(data.get("vae_latent_size", 64))
+    if vae_latent_channels <= 0 or vae_latent_size <= 0:
+        raise ValueError("vae_latent_channels and vae_latent_size must be positive.")
+    target_latent_size_raw = data.get("target_latent_size", None)
+    target_latent_size = (
+        int(target_latent_size_raw) if target_latent_size_raw is not None else None
+    )
+    if target_type == "vae_lowres":
+        if target_latent_size is None:
+            raise ValueError("target_latent_size must be set when target_type='vae_lowres'.")
+        if target_latent_size <= 0:
+            raise ValueError("target_latent_size must be positive.")
     k_repeats = data.get("k_repeats", None)
     if k_repeats is not None:
         k_repeats = int(k_repeats)
@@ -345,9 +389,10 @@ def load_eeg_encoder_config(
     raw_latent_root = data.get("image_latent_root", data.get("latent_root"))
     if raw_latent_root is None:
         raise ValueError("image_latent_root (or latent_root) must be provided.")
-    latent_root = _resolve_latent_root_for_output_dim(
+    latent_root = _resolve_latent_root_for_target_type(
         latent_root=str(raw_latent_root),
         output_dim=output_dim,
+        target_type=target_type,
     )
     subject, subjects = _resolve_subjects(data)
     return EEGEncoderConfig(
@@ -390,6 +435,11 @@ def load_eeg_encoder_config(
         averaging_mode=averaging_mode,
         k_repeats=k_repeats,
         output_dim=output_dim,
+        target_type=target_type,
+        vae_latent_channels=vae_latent_channels,
+        vae_latent_size=vae_latent_size,
+        target_latent_size=target_latent_size,
+        target_downsample_mode=target_downsample_mode,
         batch_size=int(data["batch_size"]),
         subject_chunk_size=max(1, int(data.get("subject_chunk_size", 1))),
         num_workers=int(data["num_workers"]),
@@ -485,12 +535,58 @@ def _build_encoder_eeg_transform(
     )
 
 
+def _build_latent_target_transform(config: EEGEncoderConfig):
+    target_type = str(config.target_type).lower()
+    if target_type == "pca":
+        return None
+
+    if target_type != "vae_lowres":
+        raise ValueError(f"Unsupported target_type: {config.target_type}")
+    if config.target_latent_size is None:
+        raise ValueError("target_latent_size must be set for vae_lowres targets.")
+
+    latent_channels = int(config.vae_latent_channels)
+    full_size = int(config.vae_latent_size)
+    low_size = int(config.target_latent_size)
+    mode = str(config.target_downsample_mode).lower()
+
+    def transform(latent: torch.Tensor) -> torch.Tensor:
+        if not torch.is_tensor(latent):
+            raise TypeError(f"Expected latent tensor, got {type(latent)}")
+        z = latent.to(dtype=torch.float32)
+        if z.ndim == 1:
+            expected = latent_channels * full_size * full_size
+            if z.numel() != expected:
+                raise ValueError(
+                    f"Flattened VAE latent has {z.numel()} values, expected {expected} "
+                    f"for shape ({latent_channels}, {full_size}, {full_size})."
+                )
+            z = z.view(latent_channels, full_size, full_size)
+        if z.ndim != 3:
+            raise ValueError(
+                "Expected VAE latent tensor with shape "
+                f"({latent_channels}, {full_size}, {full_size}), got {tuple(z.shape)}."
+            )
+        if tuple(z.shape) != (latent_channels, full_size, full_size):
+            raise ValueError(
+                "VAE latent shape mismatch: "
+                f"expected ({latent_channels}, {full_size}, {full_size}), got {tuple(z.shape)}."
+            )
+        interpolate_kwargs: dict[str, Any] = {"size": (low_size, low_size), "mode": mode}
+        if mode == "bilinear":
+            interpolate_kwargs["align_corners"] = False
+        return F.interpolate(z.unsqueeze(0), **interpolate_kwargs).squeeze(0)
+
+    return transform
+
+
 def _make_subject_dataset_with_transform(
     config: EEGEncoderConfig,
     subject: str,
     split: str,
     eeg_transform,
 ) -> EEGImageLatentDataset:
+    latent_transform = _build_latent_target_transform(config)
     if config.averaging_mode == "none":
         dataset = EEGImageLatentDataset(
             dataset_root=config.dataset_root,
@@ -499,6 +595,7 @@ def _make_subject_dataset_with_transform(
             split=split,
             class_indices=config.class_indices,
             transform=eeg_transform,
+            latent_transform=latent_transform,
             split_seed=config.split_seed,
         )
     else:
@@ -510,6 +607,7 @@ def _make_subject_dataset_with_transform(
             class_indices=config.class_indices,
             transform=eeg_transform,
             split_seed=config.split_seed,
+            latent_transform=latent_transform,
             averaging_mode=config.averaging_mode,
             k_repeats=config.k_repeats,
         )
@@ -917,9 +1015,21 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     gc.collect()
     # Hard constraint: model output_dim must match latent target dimension exactly.
     if target_dim != config.output_dim:
+        if config.target_type == "vae_lowres" and config.target_latent_size is not None:
+            expected = (
+                int(config.vae_latent_channels)
+                * int(config.target_latent_size)
+                * int(config.target_latent_size)
+            )
+            target_hint = (
+                "For vae_lowres, output_dim should usually be "
+                f"vae_latent_channels * target_latent_size^2 = {expected}."
+            )
+        else:
+            target_hint = "Set output_dim to match the PCA embedding dimension."
         raise ValueError(
             f"Configured output_dim={config.output_dim} but latent target dim is {target_dim}. "
-            "Set output_dim to match the PCA embedding dimension."
+            f"{target_hint}"
         )
 
     model = EEGEncoderCNN(
@@ -943,6 +1053,14 @@ def train_eeg_encoder(config: EEGEncoderConfig) -> Path:
     else:
         print(f"Class indices: {len(config.class_indices)} classes")
     print(f"Latent root: {config.latent_root}")
+    print(f"Target type: {config.target_type}")
+    if config.target_type == "vae_lowres":
+        print(
+            "VAE lowres target: "
+            f"full=({config.vae_latent_channels}, {config.vae_latent_size}, {config.vae_latent_size}), "
+            f"low=({config.vae_latent_channels}, {config.target_latent_size}, {config.target_latent_size}), "
+            f"downsample={config.target_downsample_mode}"
+        )
     print(
         "Loss weights: "
         f"mse={config.mse_loss_weight}, cosine={config.cosine_loss_weight}"

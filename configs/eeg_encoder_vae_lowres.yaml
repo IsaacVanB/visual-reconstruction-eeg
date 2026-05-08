@@ -1,37 +1,34 @@
 # Data
 dataset_root: datasets
-image_latent_root: latents/img_pca_4_all
-#subject: sub-1
+image_latent_root: latents/img_full
 # Optional multi-subject training. When set, this takes precedence over subject.
-# Use subjects: all to train on every available sub-* folder.
 subjects: [sub-1, sub-2, sub-3]
-# subjects: all
 split_seed: 0
 
-# Match latent PCA dimensionality.
-target_type: pca
-output_dim: 4
+# Target: downsampled SD-VAE latent grid.
+target_type: vae_lowres
+vae_latent_channels: 4
+vae_latent_size: 64
+target_latent_size: 8
+target_downsample_mode: area
+output_dim: 256
 
 # Optimization
 batch_size: 64
-# Number of subjects to keep loaded at once for multi-subject runs.
 subject_chunk_size: 3
 num_workers: 0
 lr: 0.001
 weight_decay: 0.001
 epochs: 50
-mse_loss_weight: 0.9
-cosine_loss_weight: 0.1
-# Stop training when validation loss does not improve by at least min_delta
-# for this many consecutive epochs. Set patience to null to disable.
+mse_loss_weight: 1.0
+cosine_loss_weight: 0.0
 early_stopping_patience: 5
 early_stopping_min_delta: 0.0
 
 # Runtime/output
 device: auto
-output_dir: outputs/eeg_encoder
-# Freeform note about what changed since the last run; saved as a .txt artifact per run.
-run_change_note: "Back to MSE loss" #"Changes MSE weight = 0.7, cosine = 0.3"
+output_dir: outputs/eeg_encoder_vae_lowres
+run_change_note: "Target downsampled VAE latents at 4x8x8"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
@@ -39,7 +36,6 @@ eeg_normalization: zscore
 eeg_zscore_eps: 1.0e-6
 
 # Optional EEG time-window crop applied at runtime before normalization.
-# Example: keep 50 ms before stimulus through 500 ms after stimulus.
 eeg_window_pre_ms: 0
 eeg_window_post_ms: 500
 
@@ -48,13 +44,9 @@ eeg_window_post_ms: 500
 # - all: average all repeats per stimulus
 # - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
 averaging_mode: none
-# Required when averaging_mode: random_k
-# k_repeats: 2
 
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]
 # - default1000: classes [0,2,4,...,1998] (capped by available classes)
 # - all: use every class available in the dataset
 class_subset: all
-# Optional explicit override (takes precedence over class_subset when provided):
-# class_indices: [0, 1, 2, 3]

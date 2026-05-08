@@ -14,6 +14,7 @@ from src.data import EEGImageLatentAveragedDataset, EEGImageLatentDataset
 from src.evaluation.eeg_eval_core import (
     build_eeg_transform_from_saved_cfg,
     build_model_for_checkpoint,
+    decode_from_lowres_vae_prediction,
     decode_from_pca_prediction,
     filter_image_indices_to_existing_files,
     filter_sample_index_to_existing_files,
@@ -153,14 +154,15 @@ def _tensor_to_uint8_hwc(image_tensor: torch.Tensor) -> np.ndarray:
 
 def _build_reconstruction_grid(
     originals: torch.Tensor,
-    pca_reconstructions: torch.Tensor,
+    target_reconstructions: torch.Tensor,
     pred_reconstructions: torch.Tensor,
     max_items: int,
+    target_row_label: str = "Target (PCA)",
 ) -> Image.Image:
     n = min(
         max_items,
         originals.size(0),
-        pca_reconstructions.size(0),
+        target_reconstructions.size(0),
         pred_reconstructions.size(0),
     )
     if n <= 0:
@@ -173,11 +175,11 @@ def _build_reconstruction_grid(
         x0 = label_w + i * w
         x1 = label_w + (i + 1) * w
         canvas[0:h, x0:x1] = _tensor_to_uint8_hwc(originals[i])
-        canvas[h : 2 * h, x0:x1] = _tensor_to_uint8_hwc(pca_reconstructions[i])
+        canvas[h : 2 * h, x0:x1] = _tensor_to_uint8_hwc(target_reconstructions[i])
         canvas[2 * h : 3 * h, x0:x1] = _tensor_to_uint8_hwc(pred_reconstructions[i])
 
     grid = Image.fromarray(canvas)
-    row_labels = ("Ground Truth", "Target (PCA)", "Reconstruction")
+    row_labels = ("Ground Truth", target_row_label, "Reconstruction")
     measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     font = ImageFont.load_default()
     try:
@@ -344,6 +346,66 @@ def _compute_gt_pca_latent_from_image(
     return z_pca
 
 
+def _target_type_from_saved_cfg(saved_cfg: dict) -> str:
+    target_type = str(saved_cfg.get("target_type", "pca")).lower()
+    if target_type not in {"pca", "vae_lowres"}:
+        raise ValueError(f"Unsupported checkpoint target_type: {target_type}")
+    return target_type
+
+
+def _resolve_lowres_shapes(
+    saved_cfg: dict,
+    full_latent_shape: tuple[int, int, int],
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    full_c, full_h, full_w = full_latent_shape
+    channels = int(saved_cfg.get("vae_latent_channels", full_c))
+    full_size = int(saved_cfg.get("vae_latent_size", full_h))
+    low_size_raw = saved_cfg.get("target_latent_size", None)
+    if low_size_raw is None:
+        output_dim = int(saved_cfg.get("output_dim", 0))
+        if channels <= 0 or output_dim % channels != 0:
+            raise ValueError(
+                "Cannot infer target_latent_size from checkpoint. "
+                "Expected saved target_latent_size or output_dim divisible by vae_latent_channels."
+            )
+        low_size = int(round((output_dim // channels) ** 0.5))
+        if channels * low_size * low_size != output_dim:
+            raise ValueError(
+                "Cannot infer square lowres latent size from output_dim="
+                f"{output_dim} and channels={channels}."
+            )
+    else:
+        low_size = int(low_size_raw)
+    full_shape = (channels, full_size, full_size)
+    if full_shape != full_latent_shape:
+        raise ValueError(
+            f"Checkpoint VAE latent shape {full_shape} does not match --latent-shape "
+            f"{full_latent_shape}."
+        )
+    return (channels, low_size, low_size), full_shape
+
+
+def _compute_gt_lowres_vae_latent_from_image(
+    gt_01_chw: torch.Tensor,
+    vae,
+    lowres_shape: tuple[int, int, int],
+    device: torch.device,
+    downsample_mode: str,
+) -> torch.Tensor:
+    x_01 = gt_01_chw.unsqueeze(0).to(device=device, dtype=torch.float32)
+    x_in = x_01 * 2.0 - 1.0
+    posterior = vae.encode(x_in).latent_dist
+    z_full = posterior.mean.to(dtype=torch.float32)
+    _channels, low_h, low_w = lowres_shape
+    interpolate_kwargs: dict[str, Any] = {
+        "size": (int(low_h), int(low_w)),
+        "mode": str(downsample_mode),
+    }
+    if str(downsample_mode) == "bilinear":
+        interpolate_kwargs["align_corners"] = False
+    return torch.nn.functional.interpolate(z_full, **interpolate_kwargs).flatten(start_dim=1)
+
+
 def main():
     args = parse_args()
 
@@ -447,24 +509,41 @@ def main():
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    pca_params_path = resolve_pca_params_path(
-        pca_params_path=args.pca_params_path,
-        latent_root=latent_root,
-    )
-    pca = load_pca_projection(
-        pca_params_path=pca_params_path,
-        device=device_t,
-    )
-    if int(saved_cfg.get("output_dim", pca["k"])) != int(pca["k"]):
-        raise ValueError(
-            f"Encoder output_dim ({saved_cfg.get('output_dim')}) does not match PCA k ({pca['k']})."
-        )
-
+    target_type = _target_type_from_saved_cfg(saved_cfg)
     c, h, w = args.latent_shape
-    if c * h * w != int(pca["d"]):
-        raise ValueError(
-            f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}."
+    full_latent_shape = (int(c), int(h), int(w))
+    pca = None
+    lowres_shape = None
+    target_row_label = "Target (PCA)"
+    if target_type == "pca":
+        pca_params_path = resolve_pca_params_path(
+            pca_params_path=args.pca_params_path,
+            latent_root=latent_root,
         )
+        pca = load_pca_projection(
+            pca_params_path=pca_params_path,
+            device=device_t,
+        )
+        if int(saved_cfg.get("output_dim", pca["k"])) != int(pca["k"]):
+            raise ValueError(
+                f"Encoder output_dim ({saved_cfg.get('output_dim')}) does not match PCA k ({pca['k']})."
+            )
+        if c * h * w != int(pca["d"]):
+            raise ValueError(
+                f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}."
+            )
+    else:
+        lowres_shape, full_latent_shape = _resolve_lowres_shapes(
+            saved_cfg=saved_cfg,
+            full_latent_shape=full_latent_shape,
+        )
+        expected_output_dim = int(lowres_shape[0]) * int(lowres_shape[1]) * int(lowres_shape[2])
+        if int(saved_cfg.get("output_dim", expected_output_dim)) != expected_output_dim:
+            raise ValueError(
+                f"Encoder output_dim ({saved_cfg.get('output_dim')}) does not match "
+                f"lowres VAE target dim ({expected_output_dim})."
+            )
+        target_row_label = "Target (Lowres VAE)"
 
     AutoencoderKL = load_autoencoder_kl_class()
     vae = AutoencoderKL.from_pretrained(args.vae_name).to(device_t).eval()
@@ -486,9 +565,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Device: {device_t}")
     print(f"Test samples: {len(dataset)}")
-    print(f"PCA shape: k={pca['k']}, D={pca['d']}")
+    print(f"Target type: {target_type}")
+    if target_type == "pca":
+        print(f"PCA shape: k={pca['k']}, D={pca['d']}")
+    else:
+        print(f"Lowres VAE shape: {lowres_shape}; full VAE shape: {full_latent_shape}")
     print(f"Scaling factor: {scaling_factor}")
-    print(f"PCA standardized: {pca['standardized']}")
+    if target_type == "pca":
+        print(f"PCA standardized: {pca['standardized']}")
     print(f"Decode latent scaling mode: {decode_scaling_mode}")
     print(f"Eval averaging mode: {eval_averaging_mode}")
     if eval_averaging_mode == "random_k":
@@ -514,19 +598,33 @@ def main():
             labels = labels[:remaining]
             batch_samples = batch_samples[:remaining]
 
-            pred_pca = model(eeg)
-            if pred_pca.shape[1] != int(pca["k"]):
-                raise RuntimeError(
-                    f"Predicted latent dim {pred_pca.shape[1]} does not match PCA k={pca['k']}."
+            pred_latent = model(eeg)
+            if target_type == "pca":
+                if pca is None:
+                    raise RuntimeError("PCA projection was not loaded.")
+                if pred_latent.shape[1] != int(pca["k"]):
+                    raise RuntimeError(
+                        f"Predicted latent dim {pred_latent.shape[1]} does not match PCA k={pca['k']}."
+                    )
+                recon_01 = decode_from_pca_prediction(
+                    pred_pca=pred_latent,
+                    pca=pca,
+                    latent_shape=(c, h, w),
+                    vae=vae,
+                    scaling_factor=scaling_factor,
+                    decode_scaling_mode=decode_scaling_mode,
                 )
-            recon_01 = decode_from_pca_prediction(
-                pred_pca=pred_pca,
-                pca=pca,
-                latent_shape=(c, h, w),
-                vae=vae,
-                scaling_factor=scaling_factor,
-                decode_scaling_mode=decode_scaling_mode,
-            )
+            else:
+                if lowres_shape is None:
+                    raise RuntimeError("Lowres VAE shape was not resolved.")
+                recon_01 = decode_from_lowres_vae_prediction(
+                    pred_low_flat=pred_latent,
+                    lowres_shape=lowres_shape,
+                    full_latent_shape=full_latent_shape,
+                    vae=vae,
+                    scaling_factor=scaling_factor,
+                    decode_scaling_mode=decode_scaling_mode,
+                )
             _, _, recon_h, recon_w = recon_01.shape
 
             for j in range(recon_01.size(0)):
@@ -553,35 +651,84 @@ def main():
                         height=int(recon_h),
                     )
                     if image_idx_int in gt_pca_recon_cache:
-                        gt_pca_recon = gt_pca_recon_cache[image_idx_int]
+                        gt_target_recon = gt_pca_recon_cache[image_idx_int]
                     else:
-                        try:
-                            latent_path = Path(dataset._resolve_latent_path(image_idx_int))
-                            gt_pca = _load_pt(latent_path)
-                            if not torch.is_tensor(gt_pca):
-                                raise TypeError(
-                                    f"Expected tensor latent at {latent_path}, got {type(gt_pca)}"
+                        if target_type == "pca":
+                            if pca is None:
+                                raise RuntimeError("PCA projection was not loaded.")
+                            try:
+                                latent_path = Path(dataset._resolve_latent_path(image_idx_int))
+                                gt_pca = _load_pt(latent_path)
+                                if not torch.is_tensor(gt_pca):
+                                    raise TypeError(
+                                        f"Expected tensor latent at {latent_path}, got {type(gt_pca)}"
+                                    )
+                                gt_pca = gt_pca.to(device=device_t, dtype=torch.float32).reshape(1, -1)
+                            except FileNotFoundError:
+                                missing_gt_latent_count += 1
+                                gt_pca = _compute_gt_pca_latent_from_image(
+                                    gt_01_chw=gt,
+                                    vae=vae,
+                                    pca=pca,
+                                    device=device_t,
                                 )
-                            gt_pca = gt_pca.to(device=device_t, dtype=torch.float32).reshape(1, -1)
-                        except FileNotFoundError:
-                            missing_gt_latent_count += 1
-                            gt_pca = _compute_gt_pca_latent_from_image(
-                                gt_01_chw=gt,
-                                vae=vae,
+                            gt_target_recon = decode_from_pca_prediction(
+                                pred_pca=gt_pca,
                                 pca=pca,
-                                device=device_t,
-                            )
-                        gt_pca_recon = decode_from_pca_prediction(
-                            pred_pca=gt_pca,
-                            pca=pca,
-                            latent_shape=(c, h, w),
-                            vae=vae,
-                            scaling_factor=scaling_factor,
-                            decode_scaling_mode=decode_scaling_mode,
-                        )[0].detach().cpu()
-                        gt_pca_recon_cache[image_idx_int] = gt_pca_recon
+                                latent_shape=(c, h, w),
+                                vae=vae,
+                                scaling_factor=scaling_factor,
+                                decode_scaling_mode=decode_scaling_mode,
+                            )[0].detach().cpu()
+                        else:
+                            if lowres_shape is None:
+                                raise RuntimeError("Lowres VAE shape was not resolved.")
+                            downsample_mode = str(saved_cfg.get("target_downsample_mode", "area"))
+                            try:
+                                latent_path = Path(dataset._resolve_latent_path(image_idx_int))
+                                gt_full = _load_pt(latent_path)
+                                if not torch.is_tensor(gt_full):
+                                    raise TypeError(
+                                        f"Expected tensor latent at {latent_path}, got {type(gt_full)}"
+                                    )
+                                gt_full = gt_full.to(device=device_t, dtype=torch.float32).reshape(1, -1)
+                                expected_full_dim = int(full_latent_shape[0]) * int(full_latent_shape[1]) * int(full_latent_shape[2])
+                                if gt_full.shape[1] != expected_full_dim:
+                                    raise ValueError(
+                                        f"Full VAE latent at {latent_path} has {gt_full.shape[1]} values, "
+                                        f"expected {expected_full_dim}."
+                                    )
+                                gt_full = gt_full.view(1, *full_latent_shape)
+                                interpolate_kwargs: dict[str, Any] = {
+                                    "size": (int(lowres_shape[1]), int(lowres_shape[2])),
+                                    "mode": downsample_mode,
+                                }
+                                if downsample_mode == "bilinear":
+                                    interpolate_kwargs["align_corners"] = False
+                                gt_low = torch.nn.functional.interpolate(
+                                    gt_full,
+                                    **interpolate_kwargs,
+                                ).flatten(start_dim=1)
+                            except FileNotFoundError:
+                                missing_gt_latent_count += 1
+                                gt_low = _compute_gt_lowres_vae_latent_from_image(
+                                    gt_01_chw=gt,
+                                    vae=vae,
+                                    lowres_shape=lowres_shape,
+                                    device=device_t,
+                                    downsample_mode=downsample_mode,
+                                )
+                            gt_target_recon = decode_from_lowres_vae_prediction(
+                                pred_low_flat=gt_low,
+                                lowres_shape=lowres_shape,
+                                full_latent_shape=full_latent_shape,
+                                vae=vae,
+                                scaling_factor=scaling_factor,
+                                decode_scaling_mode=decode_scaling_mode,
+                            )[0].detach().cpu()
+                        gt_pca_recon_cache[image_idx_int] = gt_target_recon
                     originals_for_grid.append(gt)
-                    pca_recons_for_grid.append(gt_pca_recon)
+                    pca_recons_for_grid.append(gt_target_recon)
                     recons_for_grid.append(recon_01[j].detach().cpu())
                     grid_image_indices.add(image_idx_int)
                 saved += 1
@@ -596,16 +743,20 @@ def main():
         recons_t = torch.stack(recons_for_grid, dim=0)
         grid = _build_reconstruction_grid(
             originals=originals_t,
-            pca_reconstructions=pca_recons_t,
+            target_reconstructions=pca_recons_t,
             pred_reconstructions=recons_t,
             max_items=args.grid_images,
+            target_row_label=target_row_label,
         )
         grid_path = output_dir / "recon_grid.png"
         grid.save(grid_path)
         print(f"Saved recon grid: {grid_path}")
         if missing_gt_latent_count > 0:
+            fallback_desc = (
+                "VAE+PCA" if target_type == "pca" else "VAE encode+lowres downsample"
+            )
             print(
-                "Grid GT-PCA fallback used VAE+PCA on-the-fly for "
+                f"Grid target fallback used {fallback_desc} on-the-fly for "
                 f"{missing_gt_latent_count} samples due to missing latent files."
             )
 

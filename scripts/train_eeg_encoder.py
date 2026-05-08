@@ -9,7 +9,7 @@ from src.training import load_eeg_encoder_config, train_eeg_encoder
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train EEG CNN encoder against PCA latents.")
+    parser = argparse.ArgumentParser(description="Train EEG CNN encoder against image latent targets.")
     parser.add_argument("--config", default="configs/eeg_encoder.yaml")
     parser.add_argument("--dataset-root")
     parser.add_argument("--image-latent-root")
@@ -20,6 +20,11 @@ def parse_args():
     parser.add_argument("--class-indices", type=int, nargs="+")
     parser.add_argument("--split-seed", type=int)
     parser.add_argument("--output-dim", type=int)
+    parser.add_argument("--target-type", choices=["pca", "vae_lowres"])
+    parser.add_argument("--vae-latent-channels", type=int)
+    parser.add_argument("--vae-latent-size", type=int)
+    parser.add_argument("--target-latent-size", type=int)
+    parser.add_argument("--target-downsample-mode", choices=["area", "bilinear"])
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--subject-chunk-size", type=int)
     parser.add_argument("--num-workers", type=int)
@@ -57,6 +62,11 @@ def main():
         "class_indices": args.class_indices,
         "split_seed": args.split_seed,
         "output_dim": args.output_dim,
+        "target_type": args.target_type,
+        "vae_latent_channels": args.vae_latent_channels,
+        "vae_latent_size": args.vae_latent_size,
+        "target_latent_size": args.target_latent_size,
+        "target_downsample_mode": args.target_downsample_mode,
         "batch_size": args.batch_size,
         "subject_chunk_size": args.subject_chunk_size,
         "num_workers": args.num_workers,

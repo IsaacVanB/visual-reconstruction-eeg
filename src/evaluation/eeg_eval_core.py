@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from src.data import build_eeg_transform
 from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
@@ -532,6 +533,44 @@ def decode_from_pca_prediction(
     c, h, w = latent_shape
     z_full = inverse_pca_prediction(pred_pca=pred_pca, pca=pca)
     z_vae = z_full.view(-1, c, h, w)
+    if decode_scaling_mode == "divide":
+        decode_latents = z_vae / scaling_factor
+    else:
+        decode_latents = z_vae
+    recon = vae.decode(decode_latents).sample
+    return (recon.clamp(-1.0, 1.0) + 1.0) / 2.0
+
+
+def decode_from_lowres_vae_prediction(
+    pred_low_flat: torch.Tensor,
+    lowres_shape: tuple[int, int, int],
+    full_latent_shape: tuple[int, int, int],
+    vae,
+    scaling_factor: float,
+    decode_scaling_mode: str,
+    upsample_mode: str = "bilinear",
+) -> torch.Tensor:
+    b = int(pred_low_flat.shape[0])
+    c, low_h, low_w = lowres_shape
+    full_c, full_h, full_w = full_latent_shape
+    if int(c) != int(full_c):
+        raise ValueError(
+            f"Lowres channels ({c}) do not match full latent channels ({full_c})."
+        )
+    expected = int(c) * int(low_h) * int(low_w)
+    if pred_low_flat.flatten(start_dim=1).shape[1] != expected:
+        raise ValueError(
+            f"Lowres VAE prediction has {pred_low_flat.flatten(start_dim=1).shape[1]} values, "
+            f"expected {expected} for shape {lowres_shape}."
+        )
+    z_low = pred_low_flat.reshape(b, int(c), int(low_h), int(low_w))
+    interpolate_kwargs = {
+        "size": (int(full_h), int(full_w)),
+        "mode": str(upsample_mode),
+    }
+    if str(upsample_mode) in {"bilinear", "bicubic"}:
+        interpolate_kwargs["align_corners"] = False
+    z_vae = F.interpolate(z_low, **interpolate_kwargs)
     if decode_scaling_mode == "divide":
         decode_latents = z_vae / scaling_factor
     else:
