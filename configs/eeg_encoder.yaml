@@ -16,11 +16,11 @@ batch_size: 64
 # Number of subjects to keep loaded at once for multi-subject runs.
 subject_chunk_size: 3
 num_workers: 0
-lr: 0.0001
+lr: 0.001
 weight_decay: 0.001
 epochs: 50
-mse_loss_weight: 1.0
-cosine_loss_weight: 0.0
+mse_loss_weight: 0.9
+cosine_loss_weight: 0.1
 # Stop training when validation loss does not improve by at least min_delta
 # for this many consecutive epochs. Set patience to null to disable.
 early_stopping_patience: 5
@@ -30,7 +30,7 @@ early_stopping_min_delta: 0.0
 device: auto
 output_dir: outputs/eeg_encoder
 # Freeform note about what changed since the last run; saved as a .txt artifact per run.
-run_change_note: "Training longer" #"Changes MSE weight = 0.7, cosine = 0.3"
+run_change_note: "Back to MSE loss" #"Changes MSE weight = 0.7, cosine = 0.3"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
