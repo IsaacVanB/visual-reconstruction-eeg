@@ -1,0 +1,14 @@
+{
+  "saved_at": "20260508_021307",
+  "final_train_loss": 2.260858568724464,
+  "final_train_accuracy": 0.2891544117647059,
+  "final_valid_loss": 2.704943518638611,
+  "final_valid_accuracy": 0.18625,
+  "final_test_loss": 2.684611887931824,
+  "final_test_accuracy": 0.19625,
+  "best_valid_accuracy": 0.19125,
+  "epochs": 20,
+  "evaluate_train_each_epoch": false,
+  "evaluate_test_each_epoch": false,
+  "subject_chunk_size": 1
+}

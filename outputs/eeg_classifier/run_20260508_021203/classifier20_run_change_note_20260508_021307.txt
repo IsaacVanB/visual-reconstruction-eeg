@@ -1,0 +1,12 @@
+BEST RUN!!!
+test_acc = 20.37%
+
+PARAMS:
+pre/post_window =  0/450ms
+dropout         =  0.1
+eegnet_f1       =  16
+eegnet_d        =  4
+eegnet_f2       =  default  (16x4=64)
+l1_weight       =  1e-4
+lr              =  7e-4     (w/ scheduler)
+scheduler       :  "min"/"test"
