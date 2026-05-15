@@ -21,15 +21,15 @@ num_workers: 0
 lr: 0.001
 weight_decay: 0.0001
 epochs: 150
-mse_loss_weight: 0.2
-smooth_l1_loss_weight: 0.8
+mse_loss_weight: 1.0
+smooth_l1_loss_weight: 0.0
 early_stopping_patience: 20
 early_stopping_min_delta: 0.001
 
 # Runtime/output
 device: auto
 output_dir: outputs/eeg_encoder_vae_lowres
-run_change_note: ".2 MSE + .8 Smooth L1, complete training"
+run_change_note: "MSE only, complete training"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none

@@ -5,4 +5,5 @@ latents/
 obsolete/
 scripts/ignore
 .codex
+.DS_Store
 dino-sae/

@@ -19,6 +19,7 @@ from src.data import EEGImageAveragedDataset, build_eeg_transform
 from src.evaluation.eeg_eval_core import (
     build_eeg_transform_from_saved_cfg,
     build_model_for_checkpoint,
+    decode_from_lowres_vae_prediction,
     decode_from_pca_prediction,
     filter_image_indices_to_existing_files,
     load_autoencoder_kl_class,
@@ -81,10 +82,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-samples", type=int, default=20, help="Maximum generated samples per subject.")
     parser.add_argument("--image-size", type=int, default=512)
-    parser.add_argument("--strength", type=float, default=0.8)
-    parser.add_argument("--guidance-scale", type=float, default=7.5)
+    parser.add_argument("--strength", type=float, default=0.80)
+    parser.add_argument("--guidance-scale", type=float, default=8.5)
     parser.add_argument("--num-inference-steps", type=int, default=30)
-    parser.add_argument("--seed", type=int, default=12)
+    parser.add_argument("--seed", type=int, default=102)
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--lpips-net", default="alex", choices=["alex", "vgg", "squeeze"])
@@ -102,11 +103,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--negative-prompt",
-        default="low quality, blurry, distorted, deformed, weird, unrealistic, incomplete",
+        default="low quality, blurry, distorted, deformed, out of frame, missing parts, partial object",
     )
     parser.add_argument(
         "--prompt-template",
-        default="a realistic photograph of a {label}",
+        default="a single {label}, centered in the image, full object visible from end to end, uncropped, not cut off",
         help="Template used for predicted classifier label prompts.",
     )
     parser.add_argument(
@@ -118,6 +119,15 @@ def parse_args() -> argparse.Namespace:
         "--correct-only",
         action="store_true",
         help="Only generate images for EEG samples where the classifier prediction is correct.",
+    )
+    parser.add_argument(
+        "--skip-classes",
+        nargs="+",
+        default=None,
+        help=(
+            "Ground-truth classes to skip before classification/generation. "
+            "Entries may be class names, original class ids, or contiguous classifier ids."
+        ),
     )
     parser.add_argument(
         "--classifier-trial-mode",
@@ -316,6 +326,121 @@ def _resolve_encoder_inputs(
         str(resolved_latent_root),
         str(resolved_subject),
         int(resolved_split_seed),
+    )
+
+
+def _encoder_target_type(saved_cfg: dict) -> str:
+    target_type = str(saved_cfg.get("target_type", "pca")).lower()
+    if target_type not in {"pca", "vae_lowres"}:
+        raise ValueError(f"Unsupported encoder target_type: {target_type}")
+    return target_type
+
+
+def _resolve_lowres_shapes(
+    saved_cfg: dict,
+    full_latent_shape: tuple[int, int, int],
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    full_c, full_h, _full_w = full_latent_shape
+    channels = int(saved_cfg.get("vae_latent_channels", full_c))
+    full_size = int(saved_cfg.get("vae_latent_size", full_h))
+    low_size_raw = saved_cfg.get("target_latent_size", None)
+    if low_size_raw is None:
+        output_dim = int(saved_cfg.get("output_dim", 0))
+        if channels <= 0 or output_dim % channels != 0:
+            raise ValueError(
+                "Cannot infer target_latent_size from checkpoint. "
+                "Expected saved target_latent_size or output_dim divisible by vae_latent_channels."
+            )
+        low_size = int(round((output_dim // channels) ** 0.5))
+        if channels * low_size * low_size != output_dim:
+            raise ValueError(
+                "Cannot infer square lowres latent size from output_dim="
+                f"{output_dim} and channels={channels}."
+            )
+    else:
+        low_size = int(low_size_raw)
+
+    full_shape = (channels, full_size, full_size)
+    if full_shape != full_latent_shape:
+        raise ValueError(
+            f"Checkpoint VAE latent shape {full_shape} does not match --latent-shape "
+            f"{full_latent_shape}."
+        )
+    return (channels, low_size, low_size), full_shape
+
+
+def _normalize_class_token(value: Any) -> str:
+    return str(value).strip().lower().replace(" ", "_")
+
+
+def _build_skip_class_tokens(
+    skip_classes: list[str] | None,
+    classifier_class_indices: tuple[int, ...],
+    classifier_class_names: tuple[str, ...],
+) -> set[str]:
+    if not skip_classes:
+        return set()
+    tokens = {_normalize_class_token(item) for item in skip_classes if str(item).strip()}
+    for contiguous_id, (class_id, class_name) in enumerate(
+        zip(classifier_class_indices, classifier_class_names)
+    ):
+        name_token = _normalize_class_token(class_name)
+        class_id_token = _normalize_class_token(class_id)
+        contiguous_id_token = _normalize_class_token(contiguous_id)
+        if (
+            name_token in tokens
+            or class_id_token in tokens
+            or contiguous_id_token in tokens
+        ):
+            tokens.update({name_token, class_id_token, contiguous_id_token})
+    return tokens
+
+
+def _class_matches_skip_tokens(
+    true_class_id: int,
+    true_contiguous: int,
+    true_label: str,
+    skip_class_tokens: set[str],
+) -> bool:
+    if not skip_class_tokens:
+        return False
+    candidates = {
+        _normalize_class_token(true_class_id),
+        _normalize_class_token(true_contiguous),
+        _normalize_class_token(true_label),
+    }
+    return bool(candidates & skip_class_tokens)
+
+
+def _load_target_zscore_stats(
+    saved_cfg: dict,
+    lowres_shape: tuple[int, int, int],
+    device: torch.device,
+) -> dict[str, torch.Tensor] | None:
+    mean = saved_cfg.get("target_zscore_mean")
+    std = saved_cfg.get("target_zscore_std")
+    if mean is None or std is None:
+        return None
+    expected = int(lowres_shape[0]) * int(lowres_shape[1]) * int(lowres_shape[2])
+    mean_t = torch.as_tensor(mean, device=device, dtype=torch.float32).flatten()
+    std_t = torch.as_tensor(std, device=device, dtype=torch.float32).flatten()
+    if mean_t.numel() != expected or std_t.numel() != expected:
+        raise ValueError(
+            "Checkpoint target zscore stats do not match lowres VAE target shape: "
+            f"mean={mean_t.numel()} std={std_t.numel()} expected={expected}."
+        )
+    return {"mean": mean_t, "std": std_t}
+
+
+def _unnormalize_lowres_target(
+    pred_low_flat: torch.Tensor,
+    target_zscore_stats: dict[str, torch.Tensor] | None,
+) -> torch.Tensor:
+    if target_zscore_stats is None:
+        return pred_low_flat
+    return (
+        pred_low_flat.flatten(start_dim=1) * target_zscore_stats["std"].unsqueeze(0)
+        + target_zscore_stats["mean"].unsqueeze(0)
     )
 
 
@@ -812,6 +937,11 @@ def main() -> None:
     classifier_class_indices = tuple(int(x) for x in classifier_config.class_indices)
     classifier_class_names = tuple(str(x) for x in classifier_config.class_names)
     classifier_target_tf = ClassIndexToContiguousLabel(classifier_class_indices)
+    skip_class_tokens = _build_skip_class_tokens(
+        skip_classes=args.skip_classes,
+        classifier_class_indices=classifier_class_indices,
+        classifier_class_names=classifier_class_names,
+    )
 
     encoder_tf = build_eeg_transform_from_saved_cfg(encoder_cfg)
     image_root = Path(dataset_root) / "images_THINGS" / "object_images"
@@ -859,12 +989,35 @@ def main() -> None:
     encoder.load_state_dict(encoder_ckpt["model_state_dict"])
     encoder.eval()
 
-    pca_params_path = resolve_pca_params_path(args.pca_params_path, latent_root)
-    pca = load_pca_projection(pca_params_path, device)
+    encoder_target_type = _encoder_target_type(encoder_cfg)
     c, h, w = args.latent_shape
-    if c * h * w != int(pca["d"]):
-        raise ValueError(
-            f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}."
+    full_latent_shape = (int(c), int(h), int(w))
+    pca_params_path = None
+    pca = None
+    lowres_shape = None
+    target_zscore_stats = None
+    if encoder_target_type == "pca":
+        pca_params_path = resolve_pca_params_path(args.pca_params_path, latent_root)
+        pca = load_pca_projection(pca_params_path, device)
+        if c * h * w != int(pca["d"]):
+            raise ValueError(
+                f"latent-shape {tuple(args.latent_shape)} has {c*h*w} elements, but PCA D={pca['d']}."
+            )
+    else:
+        lowres_shape, full_latent_shape = _resolve_lowres_shapes(
+            saved_cfg=encoder_cfg,
+            full_latent_shape=full_latent_shape,
+        )
+        expected_output_dim = int(lowres_shape[0]) * int(lowres_shape[1]) * int(lowres_shape[2])
+        if int(encoder_cfg.get("output_dim", expected_output_dim)) != expected_output_dim:
+            raise ValueError(
+                f"Encoder output_dim ({encoder_cfg.get('output_dim')}) does not match "
+                f"lowres VAE target dim ({expected_output_dim})."
+            )
+        target_zscore_stats = _load_target_zscore_stats(
+            saved_cfg=encoder_cfg,
+            lowres_shape=lowres_shape,
+            device=device,
         )
 
     AutoencoderKL = load_autoencoder_kl_class()
@@ -894,6 +1047,17 @@ def main() -> None:
     print(f"Subjects: {list(eval_subjects)}")
     print(f"Max samples per subject: {int(args.max_samples)}")
     print(f"Classifier trial mode: {args.classifier_trial_mode}")
+    if skip_class_tokens:
+        print(f"Skipping ground-truth classes: {sorted(skip_class_tokens)}")
+    print(f"Encoder target type: {encoder_target_type}")
+    if encoder_target_type == "pca":
+        print(f"PCA params path: {pca_params_path}")
+    else:
+        print(f"Lowres VAE shape: {lowres_shape}; full VAE shape: {full_latent_shape}")
+        if target_zscore_stats is None:
+            print("Lowres VAE target zscore: unavailable")
+        else:
+            print("Lowres VAE target zscore: loaded from checkpoint")
 
     all_manifest_rows: list[dict[str, Any]] = []
     subject_summaries: list[dict[str, Any]] = []
@@ -944,6 +1108,17 @@ def main() -> None:
                 true_class_id = image_index // int(raw_dataset.images_per_class)
                 true_contiguous = classifier_target_tf(true_class_id)
                 true_label = classifier_class_names[int(true_contiguous)]
+                if _class_matches_skip_tokens(
+                    true_class_id=int(true_class_id),
+                    true_contiguous=int(true_contiguous),
+                    true_label=true_label,
+                    skip_class_tokens=skip_class_tokens,
+                ):
+                    print(
+                        f"[{eval_subject} skip {considered}/{len(raw_dataset)}] img={image_index} "
+                        f"true={true_label} class skipped by --skip-classes"
+                    )
+                    continue
                 image_name = str(raw_dataset.train_img_files[image_index])
                 image_path = resolve_image_path(image_root=image_root, image_name=image_name)
 
@@ -974,15 +1149,33 @@ def main() -> None:
 
                 eeg_np = raw_dataset._average_repeats(image_index)
                 encoder_eeg = encoder_tf(eeg_np).unsqueeze(0).to(device=device, dtype=torch.float32)
-                pred_pca = encoder(encoder_eeg)
-                vae_recon = decode_from_pca_prediction(
-                    pred_pca=pred_pca,
-                    pca=pca,
-                    latent_shape=(c, h, w),
-                    vae=vae,
-                    scaling_factor=scaling_factor,
-                    decode_scaling_mode=decode_scaling_mode,
-                )[0]
+                pred_latent = encoder(encoder_eeg)
+                if encoder_target_type == "pca":
+                    if pca is None:
+                        raise RuntimeError("PCA projection was not loaded.")
+                    vae_recon = decode_from_pca_prediction(
+                        pred_pca=pred_latent,
+                        pca=pca,
+                        latent_shape=(c, h, w),
+                        vae=vae,
+                        scaling_factor=scaling_factor,
+                        decode_scaling_mode=decode_scaling_mode,
+                    )[0]
+                else:
+                    if lowres_shape is None:
+                        raise RuntimeError("Lowres VAE shape was not resolved.")
+                    pred_decode_latent = _unnormalize_lowres_target(
+                        pred_low_flat=pred_latent,
+                        target_zscore_stats=target_zscore_stats,
+                    )
+                    vae_recon = decode_from_lowres_vae_prediction(
+                        pred_low_flat=pred_decode_latent,
+                        lowres_shape=lowres_shape,
+                        full_latent_shape=full_latent_shape,
+                        vae=vae,
+                        scaling_factor=scaling_factor,
+                        decode_scaling_mode=decode_scaling_mode,
+                    )[0]
                 init_image = _tensor_to_pil(vae_recon, size=args.image_size)
                 gt_image = _load_ground_truth(image_path, size=args.image_size)
 
@@ -1132,6 +1325,51 @@ def main() -> None:
         )
         grid_path = subject_output_dir / "eeg_sd_grid.png"
         grid.save(grid_path)
+        correct_grid_path = None
+        incorrect_grid_path = None
+        if not args.correct_only:
+            split_grid_specs = [
+                (
+                    True,
+                    subject_output_dir / "eeg_sd_grid_correct.png",
+                    "correct",
+                ),
+                (
+                    False,
+                    subject_output_dir / "eeg_sd_grid_incorrect.png",
+                    "incorrect",
+                ),
+            ]
+            for desired_correct, split_grid_path, split_name in split_grid_specs:
+                split_indices = [
+                    idx
+                    for idx, row in enumerate(manifest_rows)
+                    if bool(row["classifier_correct"]) is desired_correct
+                ]
+                if not split_indices:
+                    print(
+                        f"[{eval_subject}] No {split_name} classifier predictions; "
+                        f"skipping {split_grid_path.name}."
+                    )
+                    continue
+                split_grid = _build_grid(
+                    [
+                        ("Ground truth", [ground_truth_images[idx] for idx in split_indices]),
+                        ("Label only", [label_only_images[idx] for idx in split_indices]),
+                        ("Label + EEG image", [label_image_images[idx] for idx in split_indices]),
+                    ],
+                    column_labels=[column_labels[idx] for idx in split_indices],
+                    cell_captions=[
+                        [ground_truth_captions[idx] for idx in split_indices],
+                        [label_only_captions[idx] for idx in split_indices],
+                        [label_image_captions[idx] for idx in split_indices],
+                    ],
+                )
+                split_grid.save(split_grid_path)
+                if desired_correct:
+                    correct_grid_path = split_grid_path
+                else:
+                    incorrect_grid_path = split_grid_path
 
         csv_path = subject_output_dir / "manifest.csv"
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
@@ -1144,6 +1382,12 @@ def main() -> None:
             "subject": eval_subject,
             "output_dir": str(subject_output_dir),
             "num_samples": len(manifest_rows),
+            "grid_path": str(grid_path),
+            "correct_grid_path": str(correct_grid_path) if correct_grid_path is not None else "",
+            "incorrect_grid_path": (
+                str(incorrect_grid_path) if incorrect_grid_path is not None else ""
+            ),
+            "skip_classes": list(args.skip_classes or []),
             "samples": manifest_rows,
         }
         subject_metadata_path.write_text(json.dumps(subject_metadata, indent=2))
@@ -1152,6 +1396,10 @@ def main() -> None:
                 "subject": eval_subject,
                 "output_dir": str(subject_output_dir),
                 "grid_path": str(grid_path),
+                "correct_grid_path": str(correct_grid_path) if correct_grid_path is not None else "",
+                "incorrect_grid_path": (
+                    str(incorrect_grid_path) if incorrect_grid_path is not None else ""
+                ),
                 "manifest_path": str(csv_path),
                 "metadata_path": str(subject_metadata_path),
                 "num_samples": len(manifest_rows),
@@ -1192,7 +1440,9 @@ def main() -> None:
                 "split_seed": split_seed,
                 "class_indices": list(classifier_class_indices),
                 "class_names": list(classifier_class_names),
-                "pca_params_path": str(pca_params_path),
+                "encoder_target_type": encoder_target_type,
+                "pca_params_path": str(pca_params_path) if pca_params_path is not None else "",
+                "lowres_vae_shape": list(lowres_shape) if lowres_shape is not None else None,
                 "vae_name": args.vae_name,
                 "sd_model_id": args.sd_model_id,
                 "decode_latent_scaling_mode": decode_scaling_mode,
@@ -1205,6 +1455,7 @@ def main() -> None:
                 "lpips_net": args.lpips_net,
                 "ssim_permutation_test": ssim_permutation_results,
                 "correct_only": bool(args.correct_only),
+                "skip_classes": list(args.skip_classes or []),
                 "classifier_trial_mode": args.classifier_trial_mode,
                 "samples": all_manifest_rows,
             },
