@@ -1,6 +1,5 @@
 # Visual Reconstruction with EEG
-⚠️ This repository is messy! We're still in development and have yet to clean up the code. ⚠️
-<br>  
+
 Reconstructing stimulus images from EEG data, with an emphasis on shape, color, and image structure over semantic accuracy. The main pipeline trains an EEG encoder to predict downsampled Stable Diffusion VAE latents, then decodes those predictions back into images.
 
 ![Model architecture](figures/model.jpg)
