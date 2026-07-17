@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 
 from src.data import EEGImageLatentDataset, build_eeg_transform  # noqa: E402

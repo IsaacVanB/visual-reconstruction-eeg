@@ -437,19 +437,19 @@ saves confusion matrix outputs.
 Recommended Colab workflow for classifier training. Use Colab as a wrapper
 around the repo scripts instead of copying training code into notebook cells.
 
-## Tests and Utilities
-
-`tests/print_eeg_latent_dataset_samples.py`
+## Tests
 
 ```bash
-EEG_DATASET_ROOT=datasets EEG_LATENT_ROOT=latents/img_pca_4_all EEG_SPLIT=test python tests/print_eeg_latent_dataset_samples.py
+pytest
 ```
 
-`tests/verify_eeg_image_pairing.py`
+## Experiment and Validation Utilities
+
+`scripts/validation/print_eeg_latent_dataset_samples.py`
 
 ```bash
-EEG_DATASET_ROOT=datasets EEG_SUBJECT=sub-1 EEG_SPLIT_SEED=0 python tests/verify_eeg_image_pairing.py
+EEG_DATASET_ROOT=datasets EEG_LATENT_ROOT=latents/img_pca_4_all EEG_SPLIT=test python scripts/validation/print_eeg_latent_dataset_samples.py
 ```
 
-`tests/stable_diffusion_test.py`  
-Legacy image-polish utility; not required for the core VAE train/eval pipeline.
+`scripts/experiments/stable_diffusion_img2img.py`
+Stable Diffusion img2img utility for prompt and inference-parameter experiments.
