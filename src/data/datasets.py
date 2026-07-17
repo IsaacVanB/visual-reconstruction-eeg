@@ -6,9 +6,6 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 
-# this file is in eeg_project_26/src/data
-# data is in eeg_project_26/datasets/THINGS_EEG_2 --> sub-1/preprocessed_eeg_training.npy
-
 
 def _resolve_class_indices(
     class_indices: Optional[Sequence[int]], num_classes: int
@@ -129,7 +126,7 @@ class EEGImageDataset(Dataset):
         self.num_classes = self.num_images // self.images_per_class
         self.class_indices = _resolve_class_indices(self.class_indices, self.num_classes)
 
-        self._split_counts = {"train": 7, "valid": 2, "test": 1} # if changing, also change in ImageDataset (~line 289)
+        self._split_counts = {"train": 7, "valid": 2, "test": 1}
         if self.split not in self._split_counts:
             raise ValueError("split must be one of: 'train', 'valid', 'test'.")
 
@@ -550,7 +547,7 @@ class ImageDataset(Dataset):
         self.num_classes = self.num_images // self.images_per_class
         self.class_indices = _resolve_class_indices(self.class_indices, self.num_classes)
 
-        self._split_counts = {"train": 7, "valid": 2, "test": 1} # if changing, also change in EEGImageDataset (~line 108)
+        self._split_counts = {"train": 7, "valid": 2, "test": 1}
         if self.split not in self._split_counts:
             raise ValueError("split must be one of: 'train', 'valid', 'test'.")
 

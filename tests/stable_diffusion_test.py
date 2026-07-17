@@ -12,15 +12,13 @@ def load_pipe(model_id: str, device: str, fp16: bool = True):
     pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
         model_id,
         torch_dtype=dtype,
-        safety_checker=None,  # speeds up; remove if you want it on
+        safety_checker=None,
         requires_safety_checker=False,
     )
 
     if device == "cuda":
         pipe = pipe.to("cuda")
-        # VRAM-saving options (safe defaults)
         pipe.enable_attention_slicing()
-        # If you installed xformers, this can help; if it errors, comment it out.
         try:
             pipe.enable_xformers_memory_efficient_attention()
         except Exception:
@@ -34,7 +32,6 @@ def load_pipe(model_id: str, device: str, fp16: bool = True):
 def load_image(path: Path, size: int | None = 512) -> Image.Image:
     img = Image.open(path).convert("RGB")
     if size is not None:
-        # SD1.5 expects multiples of 8; 512 is standard.
         img = img.resize((size, size), resample=Image.BICUBIC)
     return img
 
@@ -55,9 +52,9 @@ def polish_one(
         prompt=prompt,
         negative_prompt=negative_prompt if negative_prompt else None,
         image=init_img,
-        strength=strength,               # 0.05–0.30 recommended for “polish”
-        guidance_scale=guidance_scale,   # 3–7 typical; lower = less drift
-        num_inference_steps=steps,       # 20–30 is usually enough for img2img
+        strength=strength,
+        guidance_scale=guidance_scale,
+        num_inference_steps=steps,
         generator=generator,
     ).images[0]
     return out
@@ -74,7 +71,11 @@ def main():
     ap.add_argument("--output_dir", type=str, required=True, help="Folder to write polished images")
     ap.add_argument("--model_id", type=str, default="runwayml/stable-diffusion-v1-5")
     ap.add_argument("--size", type=int, default=512)
-    ap.add_argument("--prompt", type=str, default="a photorealistic image of an airplane in the center", help="Keep empty or neutral to avoid drift")
+    ap.add_argument(
+        "--prompt",
+        type=str,
+        default="a photorealistic image of an airplane in the center",
+    )
     ap.add_argument("--negative_prompt", type=str, default="low quality, blurry, distorted, deformed, unrealistic")
     ap.add_argument("--strength", type=float, default=0.80)
     ap.add_argument("--guidance_scale", type=float, default=7.5)
@@ -103,8 +104,6 @@ def main():
 
     for i, p in enumerate(paths):
         init_img = load_image(p, size=args.size)
-        # Use a deterministic per-image seed if you want reproducible variety:
-        # seed = args.seed + i
         seed = args.seed
 
         out = polish_one(

@@ -63,9 +63,7 @@ def resolve_torch_device(device_name: str | None) -> torch.device:
 
 
 class _TorchXPUShim:
-    """
-    Shim fix for when torch.xpu isn't on your system
-    """
+    """Compatibility shim for environments without ``torch.xpu``."""
 
     @staticmethod
     def is_available() -> bool:
