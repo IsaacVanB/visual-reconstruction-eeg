@@ -5,5 +5,10 @@ latents/
 obsolete/
 scripts/ignore
 .codex
+__pycache__/
+*.py[cod]
+*.pyo
 .DS_Store
+**/.DS_Store
+**/.DSStore
 dino-sae/
