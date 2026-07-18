@@ -4,6 +4,10 @@ Reconstructing stimulus images from EEG data, with an emphasis on shape, color, 
 
 ![Model architecture](figures/model.jpg)
 
+## Project Poster
+
+![Project poster](figures/Visual_Reconstruction_EEG_Poster.jpg)
+
 ## Results
 
 Example reconstructions:
