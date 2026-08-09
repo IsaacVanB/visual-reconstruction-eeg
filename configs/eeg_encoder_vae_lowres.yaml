@@ -29,7 +29,7 @@ early_stopping_min_delta: 0.001
 # Runtime/output
 device: auto
 output_dir: outputs/eeg_encoder_vae_lowres
-run_change_note: "MSE only, complete training"
+run_change_note: "Low-pass filter at 45 Hz"
 eval_max_samples: 16
 
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
