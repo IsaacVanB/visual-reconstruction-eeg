@@ -430,7 +430,7 @@ def load_eeg_classifier_config(
     if k_repeats is not None and k_repeats < 1:
         raise ValueError(f"k_repeats must be >= 1 when set, got: {k_repeats}")
 
-    lowpass_raw = data.get("eeg_lowpass_cutoff_hz", 50.0)
+    lowpass_raw = data.get("eeg_lowpass_cutoff_hz", 45.0)
     eeg_lowpass_cutoff_hz = float(lowpass_raw) if lowpass_raw is not None else None
     if eeg_lowpass_cutoff_hz is not None and eeg_lowpass_cutoff_hz <= 0:
         raise ValueError("eeg_lowpass_cutoff_hz must be positive or null.")

@@ -378,7 +378,7 @@ def load_eeg_encoder_config(
     early_stopping_min_delta = float(data.get("early_stopping_min_delta", 0.0))
     if early_stopping_min_delta < 0:
         raise ValueError("early_stopping_min_delta must be non-negative.")
-    lowpass_raw = data.get("eeg_lowpass_cutoff_hz", 50.0)
+    lowpass_raw = data.get("eeg_lowpass_cutoff_hz", 45.0)
     eeg_lowpass_cutoff_hz = float(lowpass_raw) if lowpass_raw is not None else None
     if eeg_lowpass_cutoff_hz is not None and eeg_lowpass_cutoff_hz <= 0:
         raise ValueError("eeg_lowpass_cutoff_hz must be positive or null.")
