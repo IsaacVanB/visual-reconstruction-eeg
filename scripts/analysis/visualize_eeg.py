@@ -469,7 +469,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subject", required=True, help="Subject number or id, e.g. 1 or sub-1.")
     parser.add_argument("--condition", type=int, required=True, help="Zero-based global training image index.")
     parser.add_argument("--repetition", type=int, default=0, help="Zero-based repetition for the original sample.")
-    parser.add_argument("--mode", choices=("stacked", "compare", "fft", "full"), default="stacked")
+    parser.add_argument(
+        "--mode",
+        choices=("stacked", "waveforms", "compare", "fft", "full"),
+        default="stacked",
+        help=(
+            "stacked shows all-channel side-by-side waveforms with spectra below; "
+            "waveforms restores the waveform-only side-by-side layout."
+        ),
+    )
     parser.add_argument("--channels", nargs="+", default=["O1"], help="Channels used by --mode compare.")
     parser.add_argument(
         "--show-dataset", choices=("both", "original", "processed"), default="both",
@@ -533,6 +541,9 @@ def main() -> None:
         figure = plot_full_comparison(
             original, processed, args.channels, args.spectrum_scale, args.freq_max
         )
+    elif args.mode == "waveforms":
+        choices = {"original": [original], "processed": [processed], "both": [original, processed]}
+        figure = plot_stacked(choices[args.show_dataset])
     else:
         choices = {"original": [original], "processed": [processed], "both": [original, processed]}
         figure = plot_stacked_with_spectra(

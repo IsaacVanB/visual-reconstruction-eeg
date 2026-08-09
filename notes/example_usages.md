@@ -4,21 +4,29 @@ This file documents active, tracked code paths for the VAE-based EEG encoder
 pipeline and the EEG classifier pipeline.
 
 Current encoder target types:
+
 - `pca`: predict PCA-compressed SD-VAE latents. Default config: `configs/eeg_encoder.yaml`.
 - `vae_lowres`: predict downsampled SD-VAE latent grids directly. Default config:
   `configs/eeg_encoder_vae_lowres.yaml`.
 
 Class subset presets supported:
+
 - EEG encoder training: `default100`, `default1000`, `all`
 - VAE latent extraction: `default100`, `default800`, `all`
 - EEG classifier training: `classifier20`, or explicit original THINGS zero-based
   `--class-indices`
 
 Subject selection:
+
 - `--subject sub-1`: train/evaluate one subject
 - `--subjects sub-1 sub-2 sub-3`: train/evaluate explicit subjects
 - `--subjects all` or `subjects: all`: use every available
   `datasets/THINGS_EEG_2/sub-*/preprocessed_eeg_training.npy`
+
+Current EEG preprocessing defaults for encoder and classifier training are a
+45 Hz low-pass filter, a 0–500 ms stimulus-relative crop, and channel-wise
+z-score normalization using training-set statistics. Repeat handling is set
+separately by `averaging_mode` (encoder) or `sample_mode` (classifier).
 
 ## Minimum Runbook
 
@@ -144,8 +152,10 @@ python src/evaluation/eval_eeg_encoder.py \
 ### EEG Classifier
 
 The default classifier config points at the compact dataset root
-`datasets/classifier20` and uses explicit original THINGS class ids. Create that
-compact dataset from the full THINGS EEG files:
+`datasets/classifier20` and currently uses 30 explicit original THINGS class
+ids. The `classifier20` directory and artifact names are retained for backward
+compatibility and should not be interpreted as the current class count. Create
+the compact dataset from the full THINGS EEG files:
 
 ```bash
 python scripts/extract_compact_eeg.py \
@@ -208,11 +218,12 @@ outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eval/
 
 ### Stable Diffusion Grid
 
-Generate an img2img Stable Diffusion grid from classifier labels and PCA EEG
-encoder VAE reconstructions. This script currently expects a PCA encoder
-checkpoint. Use the full dataset root here so EEG image indices line up with
-the full latent directory, even if the classifier was trained from compact
-files.
+Generate an img2img Stable Diffusion grid from classifier labels and EEG
+encoder VAE reconstructions. The script supports both `pca` and `vae_lowres`
+encoder checkpoints and restores the appropriate target processing from the
+checkpoint. The example below uses PCA. Use the full dataset root so EEG image
+indices line up with the full latent directory, even if the classifier was
+trained from compact files.
 
 ```bash
 python scripts/generate_eeg_sd_grid.py \
@@ -232,11 +243,15 @@ python scripts/generate_eeg_sd_grid.py \
 
 `configs/eeg_encoder.yaml`  
 Default PCA encoder config. Current defaults use:
+
 - `target_type: pca`
 - `image_latent_root: latents/img_pca_4_all`
 - `output_dim: 4`
 - `subjects: [sub-1, sub-2, sub-3]`
 - `averaging_mode: none`
+- `eeg_lowpass_cutoff_hz: 45`
+- `eeg_window_pre_ms: 0`, `eeg_window_post_ms: 500`
+- `eeg_normalization: zscore`
 
 ```bash
 python scripts/train_eeg_encoder.py --config configs/eeg_encoder.yaml
@@ -244,11 +259,15 @@ python scripts/train_eeg_encoder.py --config configs/eeg_encoder.yaml
 
 `configs/eeg_encoder_vae_lowres.yaml`  
 Default low-res VAE latent encoder config. Current defaults use:
+
 - `target_type: vae_lowres`
 - `image_latent_root: latents/img_full`
 - `target_latent_size: 8`
 - `output_dim: 256`
 - `averaging_mode: all`
+- `eeg_lowpass_cutoff_hz: 45`
+- `eeg_window_pre_ms: 0`, `eeg_window_post_ms: 500`
+- `eeg_normalization: zscore`
 
 ```bash
 python scripts/train_eeg_encoder.py --config configs/eeg_encoder_vae_lowres.yaml
@@ -256,11 +275,16 @@ python scripts/train_eeg_encoder.py --config configs/eeg_encoder_vae_lowres.yaml
 
 `configs/eeg_classifier.yaml`  
 Default classifier config for compact EEG data. Current defaults use:
+
 - `dataset_root: datasets/classifier20`
 - `subjects: all`
-- explicit `class_indices`
+- 30 explicit `class_indices` (legacy paths/artifacts still say `classifier20`)
 - `model_architecture: cnn`
 - `subject_chunk_size: 1`
+- `sample_mode: repetitions`
+- `eeg_lowpass_cutoff_hz: 45`
+- `eeg_window_pre_ms: 0`, `eeg_window_post_ms: 500`
+- `eeg_normalization: zscore`
 
 ```bash
 python scripts/train_eeg_classifier.py --config configs/eeg_classifier.yaml
@@ -307,6 +331,69 @@ Runner for train -> reconstruction eval -> optional PCA baseline metrics.
 `scripts/generate_eeg_sd_grid.py`  
 Wrapper for `src/evaluation/generate_eeg_sd_grid.py`.
 
+`scripts/analysis/visualize_eeg.py`
+
+Compare matching original THINGS-EEG2 trials with the repository's additional
+runtime processing. It uses the stored channel names and exact time vector,
+validates subject/image/repetition correspondence, and supports stacked,
+waveform-only, channel-overlay, FFT-only, and combined time/frequency views. By default the
+processed signal uses the selected repetition without averaging, applies the
+45 Hz low-pass filter, and crops to 0–500 ms. Visualization intentionally does
+not apply training-set z-score normalization, so waveform amplitudes remain in
+the loaded data's units.
+
+Default stacked comparison with the selected channel's FFT below:
+
+```bash
+python scripts/analysis/visualize_eeg.py \
+  --subject 1 \
+  --condition 100 \
+  --repetition 1 \
+  --channels Oz
+```
+
+Original waveform-only side-by-side layout:
+
+```bash
+python scripts/analysis/visualize_eeg.py \
+  --subject 1 \
+  --condition 100 \
+  --repetition 1 \
+  --mode waveforms
+```
+
+Compare selected channels in the frequency domain and save the figure:
+
+```bash
+python scripts/analysis/visualize_eeg.py \
+  --subject 1 \
+  --condition 100 \
+  --repetition 1 \
+  --mode fft \
+  --channels O1 Oz POz \
+  --spectrum-scale db \
+  --freq-max 50 \
+  --save outputs/eeg_waveforms/sub1_condition100_rep1_fft.png
+```
+
+Show time-domain and FFT comparisons for all 17 posterior channels:
+
+```bash
+python scripts/analysis/visualize_eeg.py \
+  --subject 1 \
+  --condition 100 \
+  --repetition 1 \
+  --mode full \
+  --channels O1 Oz O2 PO7 PO3 POz PO4 PO8 P7 P5 P3 P1 Pz P2 P4 P6 P8 \
+  --save outputs/eeg_waveforms/sub1_condition100_rep1_all_channels.png
+```
+
+Use `--processed-repetitions average` to average all four trials explicitly,
+`--full-window` to keep the stored -200–790 ms interval, or
+`--lowpass-cutoff-hz 0` to disable the visualization filter. If Matplotlib has
+no interactive GUI backend, the script renders a temporary PNG and opens it
+with `xdg-open`; `--save` always writes directly to the requested path.
+
 `scripts/pca_target_stats.py`  
 Compute summary stats over PCA latent targets for train/valid split.
 
@@ -316,7 +403,7 @@ python scripts/pca_target_stats.py \
   --latent-root latents/img_pca_4_all \
   --class-subset all \
   --split-seed 0 \
-  --output-path outputs/pca_target_stats_vae.json
+  --output-path outputs/pca_target_stats.json
 ```
 
 `scripts/eval_mean_image_baseline.py`  
@@ -421,7 +508,8 @@ baselines.
 
 `src/evaluation/generate_eeg_sd_grid.py`  
 Generates classifier-label-conditioned Stable Diffusion img2img grids and
-summary metrics from classifier + PCA encoder checkpoints.
+summary metrics from classifier plus PCA or low-resolution VAE encoder
+checkpoints.
 
 `src/evaluation/eeg_eval_core.py`  
 Shared checkpoint/model/loader/eval utility functions used by evaluation
