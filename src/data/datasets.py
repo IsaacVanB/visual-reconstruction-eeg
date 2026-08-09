@@ -94,7 +94,9 @@ class EEGImageDataset(Dataset):
                     f"before constructing fallback times; got {type(self.eeg)} with "
                     f"shape {getattr(self.eeg, 'shape', None)}"
                 )
-            self.times = np.arange(self.eeg.shape[-1], dtype=np.float32)
+            # Legacy dense arrays omit timestamps. THINGS-EEG2 data in this
+            # repository is sampled at 100 Hz.
+            self.times = np.arange(self.eeg.shape[-1], dtype=np.float32) / 100.0
 
         img_metadata_path = os.path.join(self.dataset_root, "THINGS_EEG_2", "image_metadata.npy")
         if not os.path.exists(img_metadata_path):

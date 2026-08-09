@@ -93,6 +93,8 @@ run_change_note: "Initial classifier implementation"
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
 eeg_normalization: zscore
 eeg_zscore_eps: 1.0e-6
+# Low-pass cutoff in Hz. Set to null to disable.
+eeg_lowpass_cutoff_hz: 50
 
 # Optional EEG time-window crop applied at runtime before normalization.
 eeg_window_pre_ms: 0

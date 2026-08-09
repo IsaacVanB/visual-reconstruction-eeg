@@ -55,6 +55,28 @@ class EEGChannelZScoreNormalize:
         return (eeg_np - self.mean) / self.std
 
 
+class EEGLowPassFilter:
+    """Zero-phase FFT low-pass filter along the final (time) axis."""
+
+    def __init__(self, cutoff_hz: float, sampling_rate_hz: float) -> None:
+        self.cutoff_hz = float(cutoff_hz)
+        self.sampling_rate_hz = float(sampling_rate_hz)
+        if self.cutoff_hz <= 0 or self.sampling_rate_hz <= 0:
+            raise ValueError("Low-pass cutoff and sampling rate must be positive.")
+        if self.cutoff_hz > self.sampling_rate_hz / 2:
+            raise ValueError(
+                f"Low-pass cutoff ({self.cutoff_hz:g} Hz) exceeds the Nyquist "
+                f"frequency ({self.sampling_rate_hz / 2:g} Hz)."
+            )
+
+    def __call__(self, eeg):
+        eeg_np = np.asarray(eeg, dtype=np.float32)
+        spectrum = np.fft.rfft(eeg_np, axis=-1)
+        frequencies = np.fft.rfftfreq(eeg_np.shape[-1], d=1.0 / self.sampling_rate_hz)
+        spectrum[..., frequencies > self.cutoff_hz] = 0
+        return np.fft.irfft(spectrum, n=eeg_np.shape[-1], axis=-1).astype(np.float32)
+
+
 def resolve_eeg_time_window(
     times,
     pre_ms: Optional[float] = None,
@@ -108,6 +130,18 @@ def crop_eeg_time_window(eeg, start_idx: int, end_idx: int):
             f"Invalid EEG time window [{start_idx}, {end_idx}] for time dimension {time_dim}."
         )
     return eeg_np[..., start_idx : end_idx + 1]
+
+
+def resolve_eeg_sampling_rate(times) -> float:
+    """Infer a uniformly sampled EEG rate from timestamps in seconds."""
+    times_np = np.asarray(times, dtype=np.float64).reshape(-1)
+    if times_np.size < 2:
+        raise ValueError("At least two EEG timepoints are required to infer sampling rate.")
+    intervals = np.diff(times_np)
+    interval = float(np.median(intervals))
+    if interval <= 0 or not np.allclose(intervals, interval, rtol=1e-3, atol=1e-8):
+        raise ValueError("EEG times must be strictly increasing and uniformly sampled.")
+    return 1.0 / interval
 
 
 class EEGTimeWindowCrop:
@@ -181,8 +215,14 @@ def build_eeg_transform(
     zscore_eps: float = 1e-6,
     crop_start_idx: int | None = None,
     crop_end_idx: int | None = None,
+    lowpass_cutoff_hz: float | None = None,
+    sampling_rate_hz: float | None = None,
 ) -> Compose:
     transforms = []
+    if lowpass_cutoff_hz is not None:
+        if sampling_rate_hz is None:
+            raise ValueError("sampling_rate_hz is required when low-pass filtering is enabled.")
+        transforms.append(EEGLowPassFilter(lowpass_cutoff_hz, sampling_rate_hz))
     if crop_start_idx is not None or crop_end_idx is not None:
         if crop_start_idx is None or crop_end_idx is None:
             raise ValueError("Both crop_start_idx and crop_end_idx must be set together.")

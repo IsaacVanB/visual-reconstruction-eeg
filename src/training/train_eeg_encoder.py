@@ -13,7 +13,12 @@ from torch.utils.data import ConcatDataset, DataLoader
 import yaml
 
 from src.data import EEGImageLatentAveragedDataset, EEGImageLatentDataset, build_eeg_transform
-from src.data.transforms import crop_eeg_time_window, resolve_eeg_time_window
+from src.data.transforms import (
+    EEGLowPassFilter,
+    crop_eeg_time_window,
+    resolve_eeg_sampling_rate,
+    resolve_eeg_time_window,
+)
 from src.models import EEGEncoderCNN, extract_eeg_encoder_cnn_arch_metadata
 
 
@@ -162,6 +167,8 @@ class EEGEncoderConfig:
     # Keep this aligned between train and eval for consistent feature scale.
     eeg_normalization: str  # one of: l2, zscore, none
     eeg_zscore_eps: float
+    eeg_lowpass_cutoff_hz: Optional[float]
+    eeg_sampling_rate_hz: Optional[float]
     eeg_l2_normalize: bool
     eeg_window_pre_ms: Optional[float]
     eeg_window_post_ms: Optional[float]
@@ -371,6 +378,10 @@ def load_eeg_encoder_config(
     early_stopping_min_delta = float(data.get("early_stopping_min_delta", 0.0))
     if early_stopping_min_delta < 0:
         raise ValueError("early_stopping_min_delta must be non-negative.")
+    lowpass_raw = data.get("eeg_lowpass_cutoff_hz", 50.0)
+    eeg_lowpass_cutoff_hz = float(lowpass_raw) if lowpass_raw is not None else None
+    if eeg_lowpass_cutoff_hz is not None and eeg_lowpass_cutoff_hz <= 0:
+        raise ValueError("eeg_lowpass_cutoff_hz must be positive or null.")
     eeg_window_pre_ms = data.get("eeg_window_pre_ms", None)
     eeg_window_post_ms = data.get("eeg_window_post_ms", None)
     if eeg_window_pre_ms is None and eeg_window_post_ms is None:
@@ -406,6 +417,8 @@ def load_eeg_encoder_config(
         class_indices=(tuple(int(x) for x in class_indices) if class_indices is not None else None),
         eeg_normalization=eeg_normalization,
         eeg_zscore_eps=float(data["eeg_zscore_eps"]),
+        eeg_lowpass_cutoff_hz=eeg_lowpass_cutoff_hz,
+        eeg_sampling_rate_hz=(float(data["eeg_sampling_rate_hz"]) if data.get("eeg_sampling_rate_hz") is not None else None),
         eeg_window_pre_ms=resolved_pre_ms,
         eeg_window_post_ms=resolved_post_ms,
         eeg_window_start_idx=(
@@ -472,14 +485,6 @@ def load_eeg_encoder_config(
 
 
 def _resolve_eeg_window_config(config: EEGEncoderConfig) -> Optional[dict[str, Any]]:
-    if config.eeg_window_pre_ms is None and config.eeg_window_post_ms is None:
-        config.eeg_window_start_idx = None
-        config.eeg_window_end_idx = None
-        config.eeg_window_actual_start_s = None
-        config.eeg_window_actual_end_s = None
-        config.eeg_window_num_timepoints = None
-        return None
-
     dataset = EEGImageLatentDataset(
         dataset_root=config.dataset_root,
         latent_root=config.latent_root,
@@ -489,6 +494,19 @@ def _resolve_eeg_window_config(config: EEGEncoderConfig) -> Optional[dict[str, A
         transform=None,
         split_seed=config.split_seed,
     )
+    config.eeg_sampling_rate_hz = resolve_eeg_sampling_rate(dataset.times)
+    if (
+        config.eeg_lowpass_cutoff_hz is not None
+        and config.eeg_lowpass_cutoff_hz > config.eeg_sampling_rate_hz / 2 + 1e-6
+    ):
+        raise ValueError("eeg_lowpass_cutoff_hz exceeds the EEG Nyquist frequency.")
+    if config.eeg_window_pre_ms is None and config.eeg_window_post_ms is None:
+        config.eeg_window_start_idx = None
+        config.eeg_window_end_idx = None
+        config.eeg_window_actual_start_s = None
+        config.eeg_window_actual_end_s = None
+        config.eeg_window_num_timepoints = None
+        return None
     window = resolve_eeg_time_window(
         dataset.times,
         pre_ms=config.eeg_window_pre_ms,
@@ -504,6 +522,9 @@ def _resolve_eeg_window_config(config: EEGEncoderConfig) -> Optional[dict[str, A
 
 def _get_eeg_transform_kwargs(config: EEGEncoderConfig) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
+    if config.eeg_lowpass_cutoff_hz is not None:
+        kwargs["lowpass_cutoff_hz"] = config.eeg_lowpass_cutoff_hz
+        kwargs["sampling_rate_hz"] = config.eeg_sampling_rate_hz
     if config.eeg_window_start_idx is not None or config.eeg_window_end_idx is not None:
         if config.eeg_window_start_idx is None or config.eeg_window_end_idx is None:
             raise ValueError(
@@ -756,6 +777,10 @@ def _compute_train_eeg_channel_stats(config: EEGEncoderConfig) -> dict[str, Any]
             raise ValueError(
                 f"Expected train EEG block [N, R, C, T] for {subject}, got {tuple(eeg_train.shape)}"
             )
+        if config.eeg_lowpass_cutoff_hz is not None:
+            eeg_train = EEGLowPassFilter(
+                config.eeg_lowpass_cutoff_hz, config.eeg_sampling_rate_hz
+            )(eeg_train)
         if config.eeg_window_start_idx is not None or config.eeg_window_end_idx is not None:
             if config.eeg_window_start_idx is None or config.eeg_window_end_idx is None:
                 raise ValueError(

@@ -115,6 +115,9 @@ def _config_from_checkpoint(
     saved_cfg.setdefault("evaluate_train_each_epoch", False)
     saved_cfg.setdefault("evaluate_test_each_epoch", False)
     saved_cfg.setdefault("subject_chunk_size", 1)
+    # Checkpoints created before low-pass support remain unfiltered.
+    saved_cfg.setdefault("eeg_lowpass_cutoff_hz", None)
+    saved_cfg.setdefault("eeg_sampling_rate_hz", None)
     saved_cfg.setdefault("dataset_class_indices", saved_cfg.get("class_indices"))
     saved_cfg.setdefault("compact_dataset", False)
     allowed_fields = set(EEGClassifierConfig.__dataclass_fields__.keys())

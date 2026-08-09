@@ -4,6 +4,7 @@ import torch
 
 from src.data.transforms import (
     EEGChannelZScoreNormalize,
+    EEGLowPassFilter,
     EEGPerSampleNormalize,
     build_eeg_transform,
     crop_eeg_time_window,
@@ -34,6 +35,21 @@ def test_channel_zscore_uses_per_channel_statistics():
     normalized = transform(eeg)
 
     np.testing.assert_allclose(normalized, [[-1.0, 1.0], [1.0, 3.0]])
+
+
+def test_lowpass_filter_removes_frequencies_above_cutoff():
+    sampling_rate = 100.0
+    times = np.arange(100, dtype=np.float32) / sampling_rate
+    low = np.sin(2 * np.pi * 5 * times)
+    high = np.sin(2 * np.pi * 30 * times)
+    filtered = EEGLowPassFilter(10, sampling_rate)((low + high)[None, :])[0]
+
+    assert np.sqrt(np.mean((filtered - low) ** 2)) < 1e-5
+
+
+def test_lowpass_filter_rejects_cutoff_above_nyquist():
+    with pytest.raises(ValueError, match="Nyquist"):
+        EEGLowPassFilter(51, 100)
 
 
 def test_resolve_and_crop_time_window():

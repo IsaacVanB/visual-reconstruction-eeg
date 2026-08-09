@@ -37,6 +37,8 @@ eval_max_samples: 16
 # EEG normalization: l2 (per-sample), zscore (train-set channel-wise), or none
 eeg_normalization: zscore
 eeg_zscore_eps: 1.0e-6
+# Low-pass cutoff in Hz. Set to null to disable.
+eeg_lowpass_cutoff_hz: 50
 
 # Optional EEG time-window crop applied at runtime before normalization.
 # Example: keep 50 ms before stimulus through 500 ms after stimulus.

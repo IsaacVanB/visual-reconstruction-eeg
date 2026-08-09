@@ -230,6 +230,13 @@ def build_eeg_transform_from_saved_cfg(saved_cfg: dict):
     if not normalize_mode:
         normalize_mode = "l2" if bool(saved_cfg.get("eeg_l2_normalize", True)) else "none"
     eeg_transform_kwargs = {}
+    cutoff = saved_cfg.get("eeg_lowpass_cutoff_hz")
+    if cutoff is not None:
+        sampling_rate = saved_cfg.get("eeg_sampling_rate_hz")
+        if sampling_rate is None:
+            raise KeyError("Checkpoint enables EEG low-pass filtering but has no sampling rate.")
+        eeg_transform_kwargs["lowpass_cutoff_hz"] = float(cutoff)
+        eeg_transform_kwargs["sampling_rate_hz"] = float(sampling_rate)
     crop_start_idx = saved_cfg.get("eeg_window_start_idx")
     crop_end_idx = saved_cfg.get("eeg_window_end_idx")
     if crop_start_idx is not None or crop_end_idx is not None:

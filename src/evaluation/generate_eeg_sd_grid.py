@@ -209,6 +209,9 @@ def _classifier_config_from_checkpoint(
     saved_cfg.setdefault("evaluate_train_each_epoch", False)
     saved_cfg.setdefault("evaluate_test_each_epoch", False)
     saved_cfg.setdefault("subject_chunk_size", 1)
+    # Checkpoints created before low-pass support remain unfiltered.
+    saved_cfg.setdefault("eeg_lowpass_cutoff_hz", None)
+    saved_cfg.setdefault("eeg_sampling_rate_hz", None)
     saved_cfg.setdefault("cnn_hidden_dim", 128)
     saved_cfg.setdefault("eegnet_f1", 8)
     saved_cfg.setdefault("eegnet_d", 2)
@@ -269,7 +272,12 @@ def _classifier_zscore_stats(checkpoint: dict[str, Any], config: EEGClassifierCo
 
 
 def _classifier_transform(config: EEGClassifierConfig, stats: dict | None):
-    kwargs: dict[str, int] = {}
+    kwargs: dict[str, Any] = {}
+    if config.eeg_lowpass_cutoff_hz is not None:
+        if config.eeg_sampling_rate_hz is None:
+            raise ValueError("Classifier checkpoint enables low-pass filtering without a sampling rate.")
+        kwargs["lowpass_cutoff_hz"] = float(config.eeg_lowpass_cutoff_hz)
+        kwargs["sampling_rate_hz"] = float(config.eeg_sampling_rate_hz)
     if config.eeg_window_start_idx is not None or config.eeg_window_end_idx is not None:
         if config.eeg_window_start_idx is None or config.eeg_window_end_idx is None:
             raise ValueError("Classifier checkpoint has partial EEG window crop metadata.")
