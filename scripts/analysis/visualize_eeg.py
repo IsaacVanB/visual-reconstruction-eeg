@@ -237,6 +237,171 @@ def plot_stacked(samples: Sequence[EEGSample]) -> plt.Figure:
     return fig
 
 
+def compute_spectrum(
+    waveform: np.ndarray, sampling_rate_hz: float, scale: str = "linear"
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a mean-removed, Hann-windowed, one-sided EEG spectrum.
+
+    Linear output is a one-sided FFT amplitude spectrum. Dividing by the Hann
+    window sum corrects its coherent gain, and interior rFFT bins are doubled
+    to account for the omitted negative-frequency half. ``db`` returns power
+    in dB relative to one squared input unit. No zero-padding is used, so the
+    frequency spacing reflects the true record duration.
+    """
+    values = np.asarray(waveform, dtype=np.float64).reshape(-1)
+    if values.size < 2:
+        raise ValueError("At least two samples are required to compute a spectrum.")
+    if sampling_rate_hz <= 0:
+        raise ValueError("sampling_rate_hz must be positive.")
+    if scale not in {"linear", "db"}:
+        raise ValueError("Spectrum scale must be 'linear' or 'db'.")
+
+    centered = values - values.mean()
+    window = np.hanning(values.size)
+    spectrum = np.fft.rfft(centered * window)
+    amplitude = np.abs(spectrum) / window.sum()
+    if values.size % 2 == 0:
+        amplitude[1:-1] *= 2.0
+    else:
+        amplitude[1:] *= 2.0
+    frequencies = np.fft.rfftfreq(values.size, d=1.0 / sampling_rate_hz)
+    if scale == "db":
+        floor = np.finfo(np.float64).tiny
+        amplitude = 10.0 * np.log10(np.maximum(amplitude**2, floor))
+    return frequencies, amplitude
+
+
+def _plot_spectra_on_axis(
+    ax: plt.Axes,
+    original: EEGSample,
+    processed: EEGSample,
+    channel: str,
+    scale: str,
+    freq_max: float,
+) -> None:
+    """Plot corresponding original and processed channel spectra on one axis."""
+    if channel not in DISPLAY_CHANNELS:
+        raise ValueError(f"Unknown channel: {channel}")
+    index = DISPLAY_CHANNELS.index(channel)
+    original_freq, original_spectrum = compute_spectrum(
+        original.data[index], original.sampling_rate_hz, scale
+    )
+    processed_freq, processed_spectrum = compute_spectrum(
+        processed.data[index], processed.sampling_rate_hz, scale
+    )
+    ax.plot(original_freq, original_spectrum, label="Original", linewidth=1.2)
+    ax.plot(processed_freq, processed_spectrum, label="Processed", linewidth=1.2)
+    ax.set_xlim(0, freq_max)
+    ax.set_ylabel("Power (dB re 1 unit²)" if scale == "db" else "FFT amplitude")
+    ax.set_title(channel)
+    ax.grid(alpha=0.2)
+    ax.legend()
+
+
+def plot_fft_comparison(
+    original: EEGSample,
+    processed: EEGSample,
+    selected_channels: Sequence[str],
+    scale: str,
+    freq_max: float,
+) -> plt.Figure:
+    """Overlay original and processed spectra for each selected channel."""
+    if not selected_channels:
+        raise ValueError("Select at least one channel.")
+    fig, axes = plt.subplots(
+        len(selected_channels), 1, figsize=(11, 3 * len(selected_channels)), squeeze=False
+    )
+    for ax, channel in zip(axes[:, 0], selected_channels):
+        _plot_spectra_on_axis(ax, original, processed, channel, scale, freq_max)
+    axes[-1, 0].set_xlabel("Frequency (Hz)")
+    fig.suptitle(f"EEG spectra — {original.subject}, image {original.image_index}: {original.image_name}")
+    fig.tight_layout()
+    return fig
+
+
+def plot_full_comparison(
+    original: EEGSample,
+    processed: EEGSample,
+    selected_channels: Sequence[str],
+    scale: str,
+    freq_max: float,
+) -> plt.Figure:
+    """Plot time-domain overlays with each channel's spectrum directly below."""
+    if not selected_channels:
+        raise ValueError("Select at least one channel.")
+    unknown = [name for name in selected_channels if name not in DISPLAY_CHANNELS]
+    if unknown:
+        raise ValueError(f"Unknown channel(s): {', '.join(unknown)}")
+    fig, axes = plt.subplots(
+        len(selected_channels) * 2,
+        1,
+        figsize=(11, 5.5 * len(selected_channels)),
+        squeeze=False,
+    )
+    for row, channel in enumerate(selected_channels):
+        index = DISPLAY_CHANNELS.index(channel)
+        time_ax = axes[row * 2, 0]
+        spectrum_ax = axes[row * 2 + 1, 0]
+        time_ax.plot(original.times_s * 1000, original.data[index], label="Original", linewidth=1.2)
+        time_ax.plot(processed.times_s * 1000, processed.data[index], label="Processed", linewidth=1.2)
+        time_ax.axvline(0, color="black", linestyle="--", linewidth=1)
+        time_ax.set_ylabel(f"{channel} amplitude")
+        time_ax.set_xlabel("Time relative to stimulus onset (ms)")
+        time_ax.grid(alpha=0.2)
+        time_ax.legend()
+        _plot_spectra_on_axis(spectrum_ax, original, processed, channel, scale, freq_max)
+        spectrum_ax.set_xlabel("Frequency (Hz)")
+    fig.suptitle(f"EEG time and frequency comparison — {original.subject}, image {original.image_index}")
+    fig.tight_layout()
+    return fig
+
+
+def plot_stacked_with_spectra(
+    samples: Sequence[EEGSample],
+    original: EEGSample,
+    processed: EEGSample,
+    selected_channels: Sequence[str],
+    scale: str,
+    freq_max: float,
+) -> plt.Figure:
+    """Plot stacked waveform panels with selected-channel spectra underneath."""
+    low, high = stacked_limits(samples)
+    span = max(high - low, np.finfo(float).eps)
+    offsets = np.arange(len(DISPLAY_CHANNELS) - 1, -1, -1) * span * 1.25
+    columns = max(len(samples), len(selected_channels))
+    fig = plt.figure(figsize=(8 * columns, 13))
+    grid = fig.add_gridspec(2, columns, height_ratios=(3.2, 1))
+    for column, sample in enumerate(samples):
+        ax = fig.add_subplot(grid[0, column])
+        for index, offset in enumerate(offsets):
+            ax.plot(sample.times_s * 1000, sample.data[index] + offset, linewidth=0.9)
+        ax.axvline(0, color="black", linestyle="--", linewidth=1)
+        ax.set_yticks(offsets, DISPLAY_CHANNELS)
+        ax.set_xlabel("Time relative to stimulus onset (ms)")
+        ax.set_title(sample.dataset_name)
+        ax.grid(axis="x", alpha=0.2)
+        if column == 0:
+            ax.set_ylabel("Channel (vertically offset)")
+    for column in range(len(samples), columns):
+        fig.add_subplot(grid[0, column]).axis("off")
+    if len(selected_channels) == 1:
+        ax = fig.add_subplot(grid[1, :])
+        _plot_spectra_on_axis(
+            ax, original, processed, selected_channels[0], scale, freq_max
+        )
+        ax.set_xlabel("Frequency (Hz)")
+    else:
+        for column, channel in enumerate(selected_channels):
+            ax = fig.add_subplot(grid[1, column])
+            _plot_spectra_on_axis(ax, original, processed, channel, scale, freq_max)
+            ax.set_xlabel("Frequency (Hz)")
+        for column in range(len(selected_channels), columns):
+            fig.add_subplot(grid[1, column]).axis("off")
+    fig.suptitle(f"{original.subject}, image {original.image_index}: {original.image_name}")
+    fig.tight_layout()
+    return fig
+
+
 def plot_channel_comparison(
     original: EEGSample, processed: EEGSample, selected_channels: Sequence[str]
 ) -> plt.Figure:
@@ -304,7 +469,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subject", required=True, help="Subject number or id, e.g. 1 or sub-1.")
     parser.add_argument("--condition", type=int, required=True, help="Zero-based global training image index.")
     parser.add_argument("--repetition", type=int, default=0, help="Zero-based repetition for the original sample.")
-    parser.add_argument("--mode", choices=("stacked", "compare"), default="stacked")
+    parser.add_argument("--mode", choices=("stacked", "compare", "fft", "full"), default="stacked")
     parser.add_argument("--channels", nargs="+", default=["O1"], help="Channels used by --mode compare.")
     parser.add_argument(
         "--show-dataset", choices=("both", "original", "processed"), default="both",
@@ -318,6 +483,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-pre-ms", type=float, default=0.0)
     parser.add_argument("--window-post-ms", type=float, default=500.0)
     parser.add_argument("--full-window", action="store_true", help="Disable the default 0–500 ms crop.")
+    parser.add_argument(
+        "--freq-max", type=float, default=50.0,
+        help="Maximum displayed frequency in Hz (default: 50).",
+    )
+    parser.add_argument(
+        "--spectrum-scale", choices=("linear", "db"), default="linear",
+        help="Plot one-sided FFT amplitude or power in dB.",
+    )
     parser.add_argument("--save", type=Path, help="Save the figure instead of opening an interactive window.")
     return parser.parse_args()
 
@@ -347,11 +520,29 @@ def main() -> None:
     print_metadata(original)
     print_metadata(processed)
 
+    nyquist_max = max(original.sampling_rate_hz, processed.sampling_rate_hz) / 2
+    if args.freq_max <= 0 or args.freq_max > nyquist_max + 1e-6:
+        raise ValueError(f"--freq-max must be in (0, {nyquist_max:g}] Hz.")
     if args.mode == "compare":
         figure = plot_channel_comparison(original, processed, args.channels)
+    elif args.mode == "fft":
+        figure = plot_fft_comparison(
+            original, processed, args.channels, args.spectrum_scale, args.freq_max
+        )
+    elif args.mode == "full":
+        figure = plot_full_comparison(
+            original, processed, args.channels, args.spectrum_scale, args.freq_max
+        )
     else:
         choices = {"original": [original], "processed": [processed], "both": [original, processed]}
-        figure = plot_stacked(choices[args.show_dataset])
+        figure = plot_stacked_with_spectra(
+            choices[args.show_dataset],
+            original,
+            processed,
+            args.channels,
+            args.spectrum_scale,
+            args.freq_max,
+        )
     if args.save:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(args.save, dpi=160, bbox_inches="tight")
