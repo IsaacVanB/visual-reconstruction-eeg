@@ -235,6 +235,29 @@ python scripts/generate_eeg_sd_grid.py \
   --metadata-path latents/img_full_metadata.json \
   --subjects all \
   --max-samples 20 \
+  --metrics both \
+  --device cuda \
+  --fp16
+```
+
+Use `--metrics ssim`, `--metrics lpips`, or `--metrics both` to choose which
+image-similarity metrics are computed and displayed beneath the generated
+images. The default is `both`. Metrics that are not selected are not loaded or
+computed, and their manifest values are left empty. The paired permutation test
+and bootstrap confidence interval describe the SSIM difference, so they are
+only generated when `ssim` or `both` is selected. For example, an LPIPS-only
+run uses:
+
+```bash
+python scripts/generate_eeg_sd_grid.py \
+  --classifier-checkpoint outputs/eeg_classifier/run_YYYYMMDD_HHMMSS/eeg_classifier20_best_YYYYMMDD_HHMMSS.pt \
+  --encoder-checkpoint outputs/eeg_encoder/run_YYYYMMDD_HHMMSS/eeg_encoder_best_YYYYMMDD_HHMMSS.pt \
+  --dataset-root datasets \
+  --latent-root latents/img_pca_4_all \
+  --pca-params-path latents/img_pca_4_all/pca_4.pt \
+  --subjects sub-1 \
+  --max-samples 20 \
+  --metrics lpips \
   --device cuda \
   --fp16
 ```
@@ -509,7 +532,8 @@ baselines.
 `src/evaluation/generate_eeg_sd_grid.py`  
 Generates classifier-label-conditioned Stable Diffusion img2img grids and
 summary metrics from classifier plus PCA or low-resolution VAE encoder
-checkpoints.
+checkpoints. `--metrics ssim|lpips|both` controls which similarity metrics are
+computed; it defaults to `both`.
 
 `src/evaluation/eeg_eval_core.py`  
 Shared checkpoint/model/loader/eval utility functions used by evaluation
