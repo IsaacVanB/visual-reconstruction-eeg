@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prompt-template",
-        default="a single {label}, centered in the image, full object visible from end to end, uncropped, not cut off",
+        default="a photograph of a {label}",
         help="Template used for predicted classifier label prompts.",
     )
     parser.add_argument(
