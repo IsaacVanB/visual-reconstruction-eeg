@@ -92,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=102)
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument(
+        "--metrics",
+        choices=["ssim", "lpips", "both"],
+        default="both",
+        help="Image similarity metrics to compute and display (default: both).",
+    )
     parser.add_argument("--lpips-net", default="alex", choices=["alex", "vgg", "squeeze"])
     parser.add_argument(
         "--ssim-permutation-test-permutations",
@@ -611,13 +617,21 @@ def _draw_caption(
         cursor_x += bbox[2] - bbox[0]
 
 
-def _metric_caption(ssim_value: float, lpips_value: float, bold_ssim: bool, bold_lpips: bool):
-    return [
-        ("↑ SSIM ", False),
-        (f"{ssim_value:.3f}", bold_ssim),
-        (" | ↓ LPIPS ", False),
-        (f"{lpips_value:.3f}", bold_lpips),
-    ]
+def _metric_caption(
+    ssim_value: float | None,
+    lpips_value: float | None,
+    bold_ssim: bool = False,
+    bold_lpips: bool = False,
+) -> list[tuple[str, bool]]:
+    """Format only the image metrics selected for the current run."""
+    segments: list[tuple[str, bool]] = []
+    if ssim_value is not None:
+        segments.extend([("↑ SSIM ", False), (f"{ssim_value:.3f}", bold_ssim)])
+    if lpips_value is not None:
+        if segments:
+            segments.append((" | ", False))
+        segments.extend([("↓ LPIPS ", False), (f"{lpips_value:.3f}", bold_lpips)])
+    return segments
 
 
 def _build_grid(
@@ -994,8 +1008,10 @@ def main() -> None:
         device=device,
         fp16=args.fp16,
     )
-    ssim_fn = _load_ssim_fn()
-    lpips_metric = _load_lpips_metric(net=args.lpips_net, device=device)
+    use_ssim = args.metrics in {"ssim", "both"}
+    use_lpips = args.metrics in {"lpips", "both"}
+    ssim_fn = _load_ssim_fn() if use_ssim else None
+    lpips_metric = _load_lpips_metric(net=args.lpips_net, device=device) if use_lpips else None
 
     if int(args.max_samples) <= 0:
         raise ValueError("--max-samples must be greater than 0.")
@@ -1007,6 +1023,7 @@ def main() -> None:
     print(f"Subjects: {list(eval_subjects)}")
     print(f"Max samples per subject: {int(args.max_samples)}")
     print(f"Classifier trial mode: {args.classifier_trial_mode}")
+    print(f"Metrics: {args.metrics}")
     if skip_class_tokens:
         print(f"Skipping ground-truth classes: {sorted(skip_class_tokens)}")
     print(f"Encoder target type: {encoder_target_type}")
@@ -1165,31 +1182,50 @@ def main() -> None:
                 gt_tensor = _pil_to_tensor_01(gt_image, device=device)
                 label_tensor = _pil_to_tensor_01(label_image, device=device)
                 label_img2img_tensor = _pil_to_tensor_01(label_img2img, device=device)
-                ssim_label_only = float(
-                    ssim_fn(label_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
+                ssim_label_only: float | None = None
+                ssim_label_image: float | None = None
+                lpips_label_only: float | None = None
+                lpips_label_image: float | None = None
+                if use_ssim:
+                    assert ssim_fn is not None
+                    ssim_label_only = float(
+                        ssim_fn(label_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
+                    )
+                    ssim_label_image = float(
+                        ssim_fn(label_img2img_tensor, gt_tensor, data_range=1.0)
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+                if use_lpips:
+                    assert lpips_metric is not None
+                    gt_tensor_lpips = gt_tensor * 2.0 - 1.0
+                    lpips_label_only = float(
+                        lpips_metric(label_tensor * 2.0 - 1.0, gt_tensor_lpips)
+                        .view(-1)
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+                    lpips_label_image = float(
+                        lpips_metric(label_img2img_tensor * 2.0 - 1.0, gt_tensor_lpips)
+                        .view(-1)
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+                label_only_better_ssim = bool(
+                    use_ssim and ssim_label_only >= ssim_label_image
                 )
-                ssim_label_image = float(
-                    ssim_fn(label_img2img_tensor, gt_tensor, data_range=1.0).detach().cpu().item()
+                label_image_better_ssim = bool(
+                    use_ssim and ssim_label_image >= ssim_label_only
                 )
-                gt_tensor_lpips = gt_tensor * 2.0 - 1.0
-                lpips_label_only = float(
-                    lpips_metric(label_tensor * 2.0 - 1.0, gt_tensor_lpips)
-                    .view(-1)
-                    .detach()
-                    .cpu()
-                    .item()
+                label_only_better_lpips = bool(
+                    use_lpips and lpips_label_only <= lpips_label_image
                 )
-                lpips_label_image = float(
-                    lpips_metric(label_img2img_tensor * 2.0 - 1.0, gt_tensor_lpips)
-                    .view(-1)
-                    .detach()
-                    .cpu()
-                    .item()
+                label_image_better_lpips = bool(
+                    use_lpips and lpips_label_image <= lpips_label_only
                 )
-                label_only_better_ssim = ssim_label_only >= ssim_label_image
-                label_image_better_ssim = ssim_label_image >= ssim_label_only
-                label_only_better_lpips = lpips_label_only <= lpips_label_image
-                label_image_better_lpips = lpips_label_image <= lpips_label_only
 
                 base_name = f"{sample_pos:02d}_img_{image_index:06d}_{pred_label}"
                 label_only_path = sd_label_dir / f"{base_name}.png"
@@ -1340,6 +1376,7 @@ def main() -> None:
         subject_metadata_path = subject_output_dir / "run_metadata.json"
         subject_metadata = {
             "subject": eval_subject,
+            "metrics": args.metrics,
             "output_dir": str(subject_output_dir),
             "num_samples": len(manifest_rows),
             "grid_path": str(grid_path),
@@ -1369,20 +1406,23 @@ def main() -> None:
     if not all_manifest_rows:
         raise RuntimeError("No samples matched the requested filter for any evaluated subject.")
 
-    ssim_permutation_results = paired_permutation_test_greater(
-        ssim_features=[row["ssim_label_image"] for row in all_manifest_rows],
-        ssim_label_only=[row["ssim_label_only"] for row in all_manifest_rows],
-        n_permutations=args.ssim_permutation_test_permutations,
-        seed=args.ssim_permutation_test_seed,
-    )
-    ssim_bootstrap_results = paired_bootstrap_mean_difference_ci(
-        ssim_features=[row["ssim_label_image"] for row in all_manifest_rows],
-        ssim_label_only=[row["ssim_label_only"] for row in all_manifest_rows],
-        confidence=args.ssim_bootstrap_confidence,
-        n_bootstrap=args.ssim_bootstrap_iterations,
-        seed=args.ssim_bootstrap_seed,
-    )
-    ssim_permutation_results["bootstrap_confidence_interval"] = ssim_bootstrap_results
+    ssim_permutation_results: dict[str, Any] | None = None
+    ssim_bootstrap_results: dict[str, Any] | None = None
+    if use_ssim:
+        ssim_permutation_results = paired_permutation_test_greater(
+            ssim_features=[row["ssim_label_image"] for row in all_manifest_rows],
+            ssim_label_only=[row["ssim_label_only"] for row in all_manifest_rows],
+            n_permutations=args.ssim_permutation_test_permutations,
+            seed=args.ssim_permutation_test_seed,
+        )
+        ssim_bootstrap_results = paired_bootstrap_mean_difference_ci(
+            ssim_features=[row["ssim_label_image"] for row in all_manifest_rows],
+            ssim_label_only=[row["ssim_label_only"] for row in all_manifest_rows],
+            confidence=args.ssim_bootstrap_confidence,
+            n_bootstrap=args.ssim_bootstrap_iterations,
+            seed=args.ssim_bootstrap_seed,
+        )
+        ssim_permutation_results["bootstrap_confidence_interval"] = ssim_bootstrap_results
 
     aggregate_csv_path = output_dir / "manifest_all_subjects.csv"
     with open(aggregate_csv_path, "w", encoding="utf-8", newline="") as f:
@@ -1390,8 +1430,10 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(all_manifest_rows)
 
-    ssim_permutation_path = output_dir / "ssim_paired_permutation_test.json"
-    ssim_permutation_path.write_text(json.dumps(ssim_permutation_results, indent=2))
+    ssim_permutation_path: Path | None = None
+    if ssim_permutation_results is not None:
+        ssim_permutation_path = output_dir / "ssim_paired_permutation_test.json"
+        ssim_permutation_path.write_text(json.dumps(ssim_permutation_results, indent=2))
 
     json_path = output_dir / "run_metadata.json"
     json_path.write_text(
@@ -1420,7 +1462,8 @@ def main() -> None:
                 "guidance_scale": args.guidance_scale,
                 "num_inference_steps": args.num_inference_steps,
                 "seed": args.seed,
-                "lpips_net": args.lpips_net,
+                "metrics": args.metrics,
+                "lpips_net": args.lpips_net if use_lpips else None,
                 "ssim_permutation_test": ssim_permutation_results,
                 "correct_only": bool(args.correct_only),
                 "skip_classes": list(args.skip_classes or []),
@@ -1431,20 +1474,23 @@ def main() -> None:
         )
     )
     print(f"Saved aggregate manifest: {aggregate_csv_path}")
-    print(f"Saved SSIM paired permutation test: {ssim_permutation_path}")
-    print(
-        f"Mean SSIM difference: {ssim_permutation_results['observed_mean_difference']:.6f}"
-    )
-    print(
-        f"{100 * ssim_bootstrap_results['confidence']:.0f}% bootstrap CI: "
-        f"[{ssim_bootstrap_results['ci_lower']:.6f}, "
-        f"{ssim_bootstrap_results['ci_upper']:.6f}]"
-    )
-    print(
-        "One-sided paired permutation p-value: "
-        f"{ssim_permutation_results['p_value_one_sided']:.6f} "
-        f"(n={ssim_permutation_results['n']})"
-    )
+    if ssim_permutation_results is not None and ssim_bootstrap_results is not None:
+        print(f"Saved SSIM paired permutation test: {ssim_permutation_path}")
+        print(
+            f"Mean SSIM difference: {ssim_permutation_results['observed_mean_difference']:.6f}"
+        )
+        print(
+            f"{100 * ssim_bootstrap_results['confidence']:.0f}% bootstrap CI: "
+            f"[{ssim_bootstrap_results['ci_lower']:.6f}, "
+            f"{ssim_bootstrap_results['ci_upper']:.6f}]"
+        )
+        print(
+            "One-sided paired permutation p-value: "
+            f"{ssim_permutation_results['p_value_one_sided']:.6f} "
+            f"(n={ssim_permutation_results['n']})"
+        )
+    else:
+        print("SSIM statistical analysis skipped (--metrics lpips).")
     print(f"Saved metadata: {json_path}")
 
 
