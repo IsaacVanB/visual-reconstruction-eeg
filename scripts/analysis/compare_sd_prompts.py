@@ -52,6 +52,7 @@ from src.evaluation.generate_eeg_sd_grid import (
     _resolve_lowres_shapes,
     _tensor_to_pil,
     _unnormalize_lowres_target,
+    paired_permutation_test_greater,
 )
 
 
@@ -355,6 +356,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-scale", type=float, default=8.5)
     parser.add_argument("--num-inference-steps", type=int, default=30)
     parser.add_argument(
+        "--ssim-permutation-test-permutations",
+        type=int,
+        default=10_000,
+        help="Random sign-flip permutations for each paired one-sided SSIM test.",
+    )
+    parser.add_argument(
+        "--ssim-permutation-test-seed",
+        type=int,
+        default=0,
+        help="Random seed for the paired SSIM permutation tests.",
+    )
+    parser.add_argument(
         "--negative-prompt",
         default="low quality, blurry, distorted, deformed, out of frame, missing parts, partial object",
     )
@@ -436,21 +449,46 @@ def main() -> None:
         )
         grid_path = prompt_dir / "generated_grid.png"
         grid.save(grid_path)
+        permutation_result = paired_permutation_test_greater(
+            ssim_features=[row["ssim_label_feature"] for row in seed_results],
+            ssim_label_only=[row["ssim_label_only"] for row in seed_results],
+            n_permutations=args.ssim_permutation_test_permutations,
+            seed=args.ssim_permutation_test_seed,
+        )
         summary = {
             "prompt": prompt,
             "grid_path": str(grid_path),
             "average_ssim_label_only": float(np.mean([row["ssim_label_only"] for row in seed_results])),
             "average_ssim_label_feature": float(np.mean([row["ssim_label_feature"] for row in seed_results])),
             "average_ssim_difference": float(np.mean([row["ssim_difference"] for row in seed_results])),
+            "ssim_paired_permutation_test": permutation_result,
             "seed_results": seed_results,
         }
         (prompt_dir / "metadata.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (prompt_dir / "ssim_paired_permutation_test.json").write_text(
+            json.dumps(permutation_result, indent=2), encoding="utf-8"
+        )
         prompt_summaries.append(summary)
         print(
             f"Prompt {prompt_index + 1}/{len(prompts)}: "
             f"label-only SSIM={summary['average_ssim_label_only']:.4f}, "
-            f"label+feature SSIM={summary['average_ssim_label_feature']:.4f}"
+            f"label+feature SSIM={summary['average_ssim_label_feature']:.4f}, "
+            f"mean difference={permutation_result['observed_mean_difference']:.4f}, "
+            f"p={permutation_result['p_value_one_sided']:.6f}, "
+            f"significant={permutation_result['alpha_0_05_significant']}"
         )
+
+    pooled_rows = [
+        row
+        for prompt_summary in prompt_summaries
+        for row in prompt_summary["seed_results"]
+    ]
+    pooled_permutation_result = paired_permutation_test_greater(
+        ssim_features=[row["ssim_label_feature"] for row in pooled_rows],
+        ssim_label_only=[row["ssim_label_only"] for row in pooled_rows],
+        n_permutations=args.ssim_permutation_test_permutations,
+        seed=args.ssim_permutation_test_seed,
+    )
 
     metadata = {
         "subject": subject,
@@ -471,6 +509,13 @@ def main() -> None:
         "strength": args.strength,
         "guidance_scale": args.guidance_scale,
         "num_inference_steps": args.num_inference_steps,
+        "ssim_permutation_test_permutations": args.ssim_permutation_test_permutations,
+        "ssim_permutation_test_seed": args.ssim_permutation_test_seed,
+        "pooled_ssim_paired_permutation_test": pooled_permutation_result,
+        "pooled_test_note": (
+            "Pooled across every prompt/seed pair. Per-prompt tests are stored in each "
+            "prompt directory and are preferable when prompts are distinct hypotheses."
+        ),
         "device": str(device),
         "fp16": bool(args.fp16 and device.type == "cuda"),
         **encoder_details,
@@ -478,8 +523,20 @@ def main() -> None:
     }
     metadata_path = output_dir / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    pooled_test_path = output_dir / "ssim_paired_permutation_test_pooled.json"
+    pooled_test_path.write_text(
+        json.dumps(pooled_permutation_result, indent=2), encoding="utf-8"
+    )
     print(f"Saved prompt comparison: {output_dir}")
     print(f"Saved metadata: {metadata_path}")
+    print(
+        "Pooled SSIM label+feature vs label-only paired permutation test: "
+        f"mean difference={pooled_permutation_result['observed_mean_difference']:.6f}, "
+        f"p={pooled_permutation_result['p_value_one_sided']:.6f}, "
+        f"n={pooled_permutation_result['n']}, "
+        f"significant={pooled_permutation_result['alpha_0_05_significant']}"
+    )
+    print(f"Saved pooled SSIM test: {pooled_test_path}")
 
 
 if __name__ == "__main__":
