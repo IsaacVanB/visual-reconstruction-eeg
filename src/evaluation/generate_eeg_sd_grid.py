@@ -32,7 +32,10 @@ from src.evaluation.eeg_eval_core import (
     resolve_pca_params_path,
     resolve_torch_device,
 )
-from src.evaluation.statistics import paired_permutation_test_greater
+from src.evaluation.statistics import (
+    paired_bootstrap_mean_difference_ci,
+    paired_permutation_test_greater,
+)
 from src.models import build_eeg_classifier_model, resolve_classifier_architecture_name
 from src.training.train_eeg_classifier import (
     EEGClassifierConfig,
@@ -102,6 +105,9 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Random seed for the paired one-sided SSIM permutation test.",
     )
+    parser.add_argument("--ssim-bootstrap-iterations", type=int, default=10_000)
+    parser.add_argument("--ssim-bootstrap-confidence", type=float, default=0.95)
+    parser.add_argument("--ssim-bootstrap-seed", type=int, default=0)
     parser.add_argument(
         "--negative-prompt",
         default="low quality, blurry, distorted, deformed, out of frame, missing parts, partial object",
@@ -1369,6 +1375,14 @@ def main() -> None:
         n_permutations=args.ssim_permutation_test_permutations,
         seed=args.ssim_permutation_test_seed,
     )
+    ssim_bootstrap_results = paired_bootstrap_mean_difference_ci(
+        ssim_features=[row["ssim_label_image"] for row in all_manifest_rows],
+        ssim_label_only=[row["ssim_label_only"] for row in all_manifest_rows],
+        confidence=args.ssim_bootstrap_confidence,
+        n_bootstrap=args.ssim_bootstrap_iterations,
+        seed=args.ssim_bootstrap_seed,
+    )
+    ssim_permutation_results["bootstrap_confidence_interval"] = ssim_bootstrap_results
 
     aggregate_csv_path = output_dir / "manifest_all_subjects.csv"
     with open(aggregate_csv_path, "w", encoding="utf-8", newline="") as f:
@@ -1419,10 +1433,17 @@ def main() -> None:
     print(f"Saved aggregate manifest: {aggregate_csv_path}")
     print(f"Saved SSIM paired permutation test: {ssim_permutation_path}")
     print(
-        "SSIM label+image vs label-only paired permutation test: "
-        f"mean_diff={ssim_permutation_results['observed_mean_difference']:.6f}, "
-        f"p={ssim_permutation_results['p_value_one_sided']:.6f}, "
-        f"n={ssim_permutation_results['n']}"
+        f"Mean SSIM difference: {ssim_permutation_results['observed_mean_difference']:.6f}"
+    )
+    print(
+        f"{100 * ssim_bootstrap_results['confidence']:.0f}% bootstrap CI: "
+        f"[{ssim_bootstrap_results['ci_lower']:.6f}, "
+        f"{ssim_bootstrap_results['ci_upper']:.6f}]"
+    )
+    print(
+        "One-sided paired permutation p-value: "
+        f"{ssim_permutation_results['p_value_one_sided']:.6f} "
+        f"(n={ssim_permutation_results['n']})"
     )
     print(f"Saved metadata: {json_path}")
 

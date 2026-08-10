@@ -61,3 +61,51 @@ def paired_permutation_test_greater(
         "alternative": "mean(ssim_label_image - ssim_label_only) > 0",
         "alpha_0_05_significant": bool(p_value < 0.05),
     }
+
+
+def paired_bootstrap_mean_difference_ci(
+    ssim_features: Sequence[float] | np.ndarray,
+    ssim_label_only: Sequence[float] | np.ndarray,
+    confidence: float = 0.95,
+    n_bootstrap: int = 10_000,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Estimate a percentile bootstrap CI for the paired mean SSIM difference.
+
+    Each bootstrap draw resamples pair indices, preserving the correspondence
+    between feature-image and label-only SSIM measurements.
+    """
+    features = np.asarray(ssim_features, dtype=float)
+    label_only = np.asarray(ssim_label_only, dtype=float)
+    if features.shape != label_only.shape:
+        raise ValueError("ssim_features and ssim_label_only must have the same shape.")
+    if features.ndim != 1:
+        raise ValueError("Inputs should be 1D arrays of matched SSIM scores.")
+    if n_bootstrap < 1:
+        raise ValueError("n_bootstrap must be >= 1.")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between 0 and 1.")
+
+    valid = np.isfinite(features) & np.isfinite(label_only)
+    features = features[valid]
+    label_only = label_only[valid]
+    if features.size == 0:
+        raise ValueError("No valid paired SSIM scores remain after removing NaNs/Infs.")
+
+    diffs = features - label_only
+    rng = np.random.default_rng(seed)
+    bootstrap_means = np.empty(n_bootstrap, dtype=float)
+    for index in range(n_bootstrap):
+        sampled_indices = rng.choice(diffs.size, size=diffs.size, replace=True)
+        bootstrap_means[index] = np.mean(diffs[sampled_indices])
+
+    alpha = 1.0 - confidence
+    lower = np.percentile(bootstrap_means, 100.0 * alpha / 2.0)
+    upper = np.percentile(bootstrap_means, 100.0 * (1.0 - alpha / 2.0))
+    return {
+        "ci_lower": float(lower),
+        "ci_upper": float(upper),
+        "confidence": float(confidence),
+        "n_bootstrap": int(n_bootstrap),
+        "seed": int(seed),
+    }

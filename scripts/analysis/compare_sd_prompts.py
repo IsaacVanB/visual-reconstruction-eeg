@@ -53,7 +53,10 @@ from src.evaluation.generate_eeg_sd_grid import (
     _tensor_to_pil,
     _unnormalize_lowres_target,
 )
-from src.evaluation.statistics import paired_permutation_test_greater
+from src.evaluation.statistics import (
+    paired_bootstrap_mean_difference_ci,
+    paired_permutation_test_greater,
+)
 
 
 def normalize_subject(value: str) -> str:
@@ -367,6 +370,9 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Random seed for the paired SSIM permutation tests.",
     )
+    parser.add_argument("--ssim-bootstrap-iterations", type=int, default=10_000)
+    parser.add_argument("--ssim-bootstrap-confidence", type=float, default=0.95)
+    parser.add_argument("--ssim-bootstrap-seed", type=int, default=0)
     parser.add_argument(
         "--negative-prompt",
         default="low quality, blurry, distorted, deformed, out of frame, missing parts, partial object",
@@ -455,6 +461,14 @@ def main() -> None:
             n_permutations=args.ssim_permutation_test_permutations,
             seed=args.ssim_permutation_test_seed,
         )
+        bootstrap_result = paired_bootstrap_mean_difference_ci(
+            ssim_features=[row["ssim_label_feature"] for row in seed_results],
+            ssim_label_only=[row["ssim_label_only"] for row in seed_results],
+            confidence=args.ssim_bootstrap_confidence,
+            n_bootstrap=args.ssim_bootstrap_iterations,
+            seed=args.ssim_bootstrap_seed,
+        )
+        permutation_result["bootstrap_confidence_interval"] = bootstrap_result
         summary = {
             "prompt": prompt,
             "grid_path": str(grid_path),
@@ -474,6 +488,8 @@ def main() -> None:
             f"label-only SSIM={summary['average_ssim_label_only']:.4f}, "
             f"label+feature SSIM={summary['average_ssim_label_feature']:.4f}, "
             f"mean difference={permutation_result['observed_mean_difference']:.4f}, "
+            f"{100 * bootstrap_result['confidence']:.0f}% CI="
+            f"[{bootstrap_result['ci_lower']:.4f}, {bootstrap_result['ci_upper']:.4f}], "
             f"p={permutation_result['p_value_one_sided']:.6f}, "
             f"significant={permutation_result['alpha_0_05_significant']}"
         )
@@ -489,6 +505,14 @@ def main() -> None:
         n_permutations=args.ssim_permutation_test_permutations,
         seed=args.ssim_permutation_test_seed,
     )
+    pooled_bootstrap_result = paired_bootstrap_mean_difference_ci(
+        ssim_features=[row["ssim_label_feature"] for row in pooled_rows],
+        ssim_label_only=[row["ssim_label_only"] for row in pooled_rows],
+        confidence=args.ssim_bootstrap_confidence,
+        n_bootstrap=args.ssim_bootstrap_iterations,
+        seed=args.ssim_bootstrap_seed,
+    )
+    pooled_permutation_result["bootstrap_confidence_interval"] = pooled_bootstrap_result
 
     metadata = {
         "subject": subject,
@@ -511,6 +535,9 @@ def main() -> None:
         "num_inference_steps": args.num_inference_steps,
         "ssim_permutation_test_permutations": args.ssim_permutation_test_permutations,
         "ssim_permutation_test_seed": args.ssim_permutation_test_seed,
+        "ssim_bootstrap_iterations": args.ssim_bootstrap_iterations,
+        "ssim_bootstrap_confidence": args.ssim_bootstrap_confidence,
+        "ssim_bootstrap_seed": args.ssim_bootstrap_seed,
         "pooled_ssim_paired_permutation_test": pooled_permutation_result,
         "pooled_test_note": (
             "Pooled across every prompt/seed pair. Per-prompt tests are stored in each "
@@ -529,12 +556,17 @@ def main() -> None:
     )
     print(f"Saved prompt comparison: {output_dir}")
     print(f"Saved metadata: {metadata_path}")
+    print(f"Mean SSIM difference: {pooled_permutation_result['observed_mean_difference']:.6f}")
     print(
-        "Pooled SSIM label+feature vs label-only paired permutation test: "
-        f"mean difference={pooled_permutation_result['observed_mean_difference']:.6f}, "
-        f"p={pooled_permutation_result['p_value_one_sided']:.6f}, "
-        f"n={pooled_permutation_result['n']}, "
-        f"significant={pooled_permutation_result['alpha_0_05_significant']}"
+        f"{100 * pooled_bootstrap_result['confidence']:.0f}% bootstrap CI: "
+        f"[{pooled_bootstrap_result['ci_lower']:.6f}, "
+        f"{pooled_bootstrap_result['ci_upper']:.6f}]"
+    )
+    print(
+        "One-sided paired permutation p-value: "
+        f"{pooled_permutation_result['p_value_one_sided']:.6f} "
+        f"(n={pooled_permutation_result['n']}, "
+        f"significant={pooled_permutation_result['alpha_0_05_significant']})"
     )
     print(f"Saved pooled SSIM test: {pooled_test_path}")
 
