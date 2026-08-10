@@ -32,6 +32,7 @@ from src.evaluation.eeg_eval_core import (
     resolve_pca_params_path,
     resolve_torch_device,
 )
+from src.evaluation.statistics import paired_permutation_test_greater
 from src.models import build_eeg_classifier_model, resolve_classifier_architecture_name
 from src.training.train_eeg_classifier import (
     EEGClassifierConfig,
@@ -547,61 +548,6 @@ def _load_lpips_metric(net: str, device: torch.device):
         raise ImportError("lpips is required for LPIPS. Install with: pip install lpips") from exc
 
     return lpips.LPIPS(net=net).to(device).eval()
-
-
-def paired_permutation_test_greater(
-    ssim_features,
-    ssim_label_only,
-    n_permutations: int = 10_000,
-    seed: int = 0,
-) -> dict[str, Any]:
-    """
-    One-sided paired permutation test.
-
-    H0: mean(ssim_features - ssim_label_only) <= 0
-    H1: mean(ssim_features - ssim_label_only) > 0
-    """
-    if n_permutations < 1:
-        raise ValueError("n_permutations must be >= 1.")
-
-    ssim_features = np.asarray(ssim_features, dtype=float)
-    ssim_label_only = np.asarray(ssim_label_only, dtype=float)
-
-    if ssim_features.shape != ssim_label_only.shape:
-        raise ValueError("ssim_features and ssim_label_only must have the same shape.")
-    if ssim_features.ndim != 1:
-        raise ValueError("Inputs should be 1D arrays of matched SSIM scores.")
-
-    valid = np.isfinite(ssim_features) & np.isfinite(ssim_label_only)
-    ssim_features = ssim_features[valid]
-    ssim_label_only = ssim_label_only[valid]
-    if len(ssim_features) == 0:
-        raise ValueError("No valid paired SSIM scores remain after removing NaNs/Infs.")
-
-    differences = ssim_features - ssim_label_only
-    observed_mean_diff = np.mean(differences)
-    rng = np.random.default_rng(seed)
-
-    permuted_mean_diffs = np.empty(n_permutations, dtype=float)
-    for i in range(n_permutations):
-        signs = rng.choice([-1, 1], size=len(differences))
-        permuted_mean_diffs[i] = np.mean(signs * differences)
-
-    p_value = (np.sum(permuted_mean_diffs >= observed_mean_diff) + 1) / (
-        n_permutations + 1
-    )
-
-    return {
-        "n": int(len(differences)),
-        "observed_mean_ssim_features": float(np.mean(ssim_features)),
-        "observed_mean_ssim_label_only": float(np.mean(ssim_label_only)),
-        "observed_mean_difference": float(observed_mean_diff),
-        "p_value_one_sided": float(p_value),
-        "n_permutations": int(n_permutations),
-        "seed": int(seed),
-        "alternative": "mean(ssim_label_image - ssim_label_only) > 0",
-        "alpha_0_05_significant": bool(p_value < 0.05),
-    }
 
 
 def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:

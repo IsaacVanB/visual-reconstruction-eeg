@@ -23,8 +23,8 @@ weight_decay: 0.0001
 epochs: 150
 mse_loss_weight: 1.0
 smooth_l1_loss_weight: 0.0
-early_stopping_patience: 20
-early_stopping_min_delta: 0.001
+early_stopping_patience: 10
+early_stopping_min_delta: 0.0
 
 # Runtime/output
 device: auto
@@ -46,7 +46,7 @@ eeg_window_post_ms: 500
 # - none: use individual trials/repeats as separate training examples
 # - all: average all repeats per stimulus
 # - random_k: sample k repeats per __getitem__ (train split only; valid/test always average all repeats)
-averaging_mode: all
+averaging_mode: none
 
 # Subset experiment control:
 # - default100: classes [0,2,4,...,198]

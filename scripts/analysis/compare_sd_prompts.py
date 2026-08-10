@@ -52,8 +52,8 @@ from src.evaluation.generate_eeg_sd_grid import (
     _resolve_lowres_shapes,
     _tensor_to_pil,
     _unnormalize_lowres_target,
-    paired_permutation_test_greater,
 )
+from src.evaluation.statistics import paired_permutation_test_greater
 
 
 def normalize_subject(value: str) -> str:

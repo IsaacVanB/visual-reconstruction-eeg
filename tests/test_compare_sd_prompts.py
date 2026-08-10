@@ -38,16 +38,3 @@ def test_resolve_prompts_combines_cli_and_file(tmp_path):
         "a red object",
         "a blue object",
     ]
-
-
-def test_paired_permutation_test_reports_positive_feature_improvement():
-    result = MODULE.paired_permutation_test_greater(
-        ssim_features=[0.5, 0.6, 0.7, 0.8],
-        ssim_label_only=[0.1, 0.2, 0.3, 0.4],
-        n_permutations=1000,
-        seed=0,
-    )
-
-    assert result["n"] == 4
-    assert result["observed_mean_difference"] == pytest.approx(0.4)
-    assert 0.0 < result["p_value_one_sided"] <= 1.0
